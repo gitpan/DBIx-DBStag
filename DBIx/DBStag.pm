@@ -1,4 +1,4 @@
-# $Id: DBStag.pm,v 1.31 2004/07/15 19:14:29 cmungall Exp $
+# $Id: DBStag.pm,v 1.36 2004/09/30 19:20:58 cmungall Exp $
 # -------------------------------------------------------
 #
 # Copyright (C) 2002 Chris Mungall <cjm@fruitfly.org>
@@ -22,7 +22,7 @@ use DBIx::DBSchema;
 use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION="0.04";
+$VERSION="0.05";
 
 
 our $DEBUG;
@@ -82,9 +82,21 @@ sub connect {
     };
     if ($@ || !$self->dbh) {
 	my $mapf = $ENV{DBSTAG_DBIMAP_FILE};
-	print STDERR <<EOM
+        if ($dbi =~ /^dbi:(\w+)/) {
+            print STDERR <<EOM
 
-Could not connect to database "$dbi"
+Could not connect to database: "$dbi"
+
+EITHER   The required DBD driver "$1" is not installed
+    OR   There is no such database as "$dbi"
+
+EOM
+              ;
+        }
+        else {
+            print STDERR <<EOM
+
+Could not connect to database: "$dbi"
 
 To connect to a database, you need to set the environment variable
 DBSTAG_DBIMAP_FILE to the location of your DBI Stag resources file, OR
@@ -103,12 +115,16 @@ If you are specifying a valid DBI locator or valid logical name and
 still connect, check the database server is responding
 
 EOM
-	  ;
-	exit 0;
+              ;
+        }
+        exit 1;
     }
     # HACK
     $self->dbh->{RaiseError} = 1;
     $self->dbh->{ShowErrorStatement} = 1;
+    if ($dbi =~ /dbi:(\w+)/) {
+        $self->{_driver} = $1;
+    }
     $self->setup;
     return $self;
 }
@@ -765,6 +781,8 @@ sub _autoddl {
 #
 # we keep a cache of what is stored in
 # each table
+#
+# cache->{$element}->{$key}->{$val}
 # ----------------------------------------
 
 # list of table names that should be cached
@@ -776,76 +794,88 @@ sub cached_tables {
 
 sub is_caching_on {
     my $self = shift;
-    return 0;
+    my $element  = shift;
+    $self->{_is_caching_on} = {}
+      unless $self->{_is_caching_on};
+    if (@_) {
+        $self->{_is_caching_on}->{$element} = shift;
+    }
+    return $self->{_is_caching_on}->{$element};
 }
 
 sub query_cache {
     my $self = shift;
     my $element = shift;
     my $constr = shift;
-
-    my $cached_tuples = $self->get_cached_tuples($element);
-
-    foreach my $tuple (@$cached_tuples) {
-        my $is_different = 0;
-        foreach my $col (keys %$constr) {
-            unless (defined $tuple->{$col} &&
-                defined $constr->{$col} &&
-                $tuple->{$col} eq $constr->{$col}) {
-                $is_different = 1;
-            }
-        }
-        if (!$is_different) {
-            # we found the corresponding tuple -
-            return $tuple;
-        }
+    my $update_h = shift;
+    my @keycols = sort keys %$constr;
+    my $cache = $self->get_tuple_idx($element, \@keycols);
+    my $valstr = join("\t", map {$constr->{$_}} @keycols);
+#    use Data::Dumper;
+#    print Dumper $cache;
+    if ($update_h) {
+        my $current_h = $cache->{$valstr} || {};
+        $current_h->{$_} = $update_h->{$_} foreach keys %$update_h;
+        $cache->{$valstr} = $current_h;
     }
-
+    return $cache->{$valstr};
 }
 
 sub insert_into_cache {
     my $self = shift;
     my $element = shift;
     my $insert_h = shift;
-    my $cached_tuples = $self->get_cached_tuples($element);
-    push(@$cached_tuples,
-         $insert_h);
-    return;
+    my $usets = shift;
+    foreach my $uset (@$usets) {
+        my @undef = grep {!defined $insert_h->{$_}} @$uset;
+        if (@undef) {
+            my @defined = grep {defined $insert_h->{$_}} @$uset;
+            trace(1, 
+                  "undefined column in unique key: @$uset IN $element/[@$uset] ".
+                  join('; ', 
+                       map {"$_=$insert_h->{$_}"} @defined,
+                      )
+                 );
+            # cannot cache undefined values
+            next;
+        }
+        my $cache = $self->get_tuple_idx($element, $uset);
+        my $valstr = join("\t", map {$insert_h->{$_}} sort @$uset);
+        $cache->{$valstr} = $insert_h;
+    }
+    return 1;
 }
 
 sub update_cache {
     my $self = shift;
     my $element = shift;
     my $store_hash = shift;
-    my $update_constr = shift;
+    my $unique_constr = shift;
 
     my $tuple = $self->query_cache($element,
-                                   $update_constr);
-    if ($tuple) {
-        # we found the corresponding tuple -
-        # update it
-        foreach my $col (keys %$store_hash) {
-            $tuple->{$col} = $store_hash->{$col}
-        }
-        return;
-    }
-    
-    my $cached_tuples = $self->get_cached_tuples($element);
-    push(@$cached_tuples,
-         {%$store_hash,
-          %$update_constr});
-
+                                   $unique_constr,
+                                   $store_hash);
     return;
 }
 
-sub get_cached_tuples {
+sub get_tuple_idx {
     my $self = shift;
     my $element = shift;
+    my @keycols = sort @{shift || []} || $self->throw;
+    
     my $cache = $self->cache;
     if (!$cache->{$element}) {
-        $cache->{$element} = [];
+        $cache->{$element} = {};
     }
-    return $cache->{$element};    
+    my $eltcache = $cache->{$element};
+    # we just use a flat perl hash - flatten the list of unique cols
+    # to a string with spaces between
+    my $k = "@keycols";
+    if (!$eltcache->{$k}) {
+        $eltcache->{$k} = {};
+    }
+    
+    return $eltcache->{$k};    
 }
 
 sub cache {
@@ -1005,6 +1035,14 @@ sub _storenode {
     if ($element eq 'dbstag_metadata') {
         my @maps = $node->get_map;
         $self->mapping(\@maps);
+        my @links = $node->get_link;
+        if (@links) {
+            my %h =
+              map {
+                  ($_->sget_table => [$_->sget_from, $_->sget_to])
+              } @links;
+            $self->linking_tables(%h);
+        }
         return;
     }
     trace(0, "STORING $element\n", $node->xml);
@@ -1021,7 +1059,7 @@ sub _storenode {
     my $dbh = $self->dbh;
     my $dbschema = $self->dbschema;
 
-    my $is_caching_on = $self->is_caching_on($element);
+    my $is_caching_on = $self->is_caching_on($element) || 0;
 
     my $mapping = $self->mapping || [];
 
@@ -1052,9 +1090,12 @@ sub _storenode {
         # check for either of these conditions
         my ($map) =
           grep { 
-              $_->get_table eq $element &&
-                ($_->get_fktable_alias eq $nt->element ||
-                 ($_->get_fktable eq $nt->element && !$_->get_fktable_alias))
+              $_->get_table && 
+                $_->get_table eq $element &&
+                ($_->get_fktable_alias && 
+                 $_->get_fktable_alias eq $nt->element ||
+                 ($_->get_fktable && 
+                  $_->get_fktable eq $nt->element && !$_->get_fktable_alias))
             } @$mapping;
         # check to see if sub-element has FK to this element
         if (!$map) {
@@ -1226,7 +1267,7 @@ sub _storenode {
     # to update.
     #
     # this hash is used to determine the key/val pairs
-    my %update_constr;
+    my %unique_constr;
 
     # this is the value of the primary key of
     # the inserted/update row
@@ -1245,7 +1286,7 @@ sub _storenode {
             $node->unset($pkcol);
 
             # set the update constraint based on the PK value
-            %update_constr = ($pkcol => $pk_id);
+            %unique_constr = ($pkcol => $pk_id);
 
             # return this value at the end
             $id = $pk_id;
@@ -1272,12 +1313,16 @@ sub _storenode {
         @usets = ( [grep {$_ ne $pkcol} @cols] );
     }
     if ($pkcol) {
-        # make single PK the first unique key set
+        # make single PK the first unique key set;
+        # add to beginning as this is the most efficient
         unshift(@usets, [$pkcol]);
     }
 
+    # get the column to select to get the pk for this element
+    my $select_col = $pkcol;
+
     # -------- find update constraint by unique keys ----
-    # if the update_constr hash is set, we know we
+    # if the unique_constr hash is set, we know we
     # are doing an UPDATE, and we know the query
     # constraint that will be used;
     #
@@ -1290,7 +1335,7 @@ sub _storenode {
     # is performed
     foreach my $uset (@usets) {
         # we already know & have the primary key
-        last if %update_constr;
+        last if %unique_constr;
 
         # if we are loading up a fresh/blank slate
         # database then we don't need to check for
@@ -1305,9 +1350,10 @@ sub _storenode {
 #            $uset->[0] eq $pkcol) {
 #            next;
 #        }
-        trace(0, "TRYING USET: @$uset;; [pk=$pkcol]");
+        trace(0, "TRYING USET: ;@$uset; [pk=$pkcol]");
 
-        # get the values of the unique key columns
+        # get the values of the unique key columns;
+        # %constr is a candidate unique key=>val mapping
         my %constr =
           map {
               my $v = $node->sget($_);
@@ -1318,93 +1364,122 @@ sub _storenode {
         # non-NULL; try the next unique key if
         # this one is unsuitable
         next if grep { !defined($_) } values %constr;
+        %unique_constr = %constr;
+        if (!$select_col && @$uset == 1) {
+            $select_col = $uset->[0];
+        }
+        trace(0, "GOT unique_constr, select_col=$select_col");
+        last;
+    }
+    # -- END OF @usets --
 
-        # what if no pk???
-        my $select_col = $pkcol || $uset->[0]; # use pk if possible
+    # %unique_constr is set; a mapping for a unique key colset
+    # if this is not set, then we must insert
 
-        # TEST
+    if (%unique_constr) {
+
+        # -- IN-MEMORY CACHING --
         # check if we have already updated/inserted
         # this tuple this session; and if so, what
         # the update constraint used was
-        if ($is_caching_on) {
+        if ($is_caching_on == 1 || $is_caching_on == 3) {
 
-            # --
-            # EXPERIMENTAL
-            #
-            # caching off for now
-            #
-            # --
-
+            #$self->throw("no select col for $element") unless $select_col;
+            # fetch values of unique_constr from cache
             my %cached_colvals =
-              $self->query_cache($element,
-                                 \%constr,
-                                 $select_col);
-            my $is_different = 0;
-            foreach my $col (keys %cached_colvals) {
-                if (defined $cached_colvals{$col} &&
-                    $cached_colvals{$col} ne $store_hash{$col}) {
-                    $is_different = 1;
-                    last; # don't bother checking the others
-                }
-            }
-            if (!$is_different) {
-                # no change, so no point doing
-                # any database operations;
-                # just return the primary key
+              %{$self->query_cache($element,
+                                   \%unique_constr)
+                  || {}};
+            # have we stored anything with uniq key %unique_constr before?
+            if (%cached_colvals) {
                 if ($pkcol) {
                     $id = $cached_colvals{$pkcol};
+                    if ($id) {
+                        # use the cached pk id for efficiency
+                        #%unique_constr = {$pkcol => $id};
+                        trace(0, "CACHED $pkcol  = $id");
+                    }
+                    else {
+                        trace(0, "NO CACHED COLVAL FOR $pkcol :: ".
+                             join("; ",map {"$_ = $cached_colvals{$_}"} keys %cached_colvals));
+                    }
                 }
-                if ($tracekeyval) {
-                    printf STDERR "IGNORING CACHED: $tracenode = $tracekeyval\n"
+
+                # yes - has it changed?
+                foreach my $col (keys %cached_colvals) {
+                    if ($cached_colvals{$col} && $store_hash{$col} &&
+                        $cached_colvals{$col} && $store_hash{$col}) {
+                        # don't bother re-storing anything
+                        delete $store_hash{$col};
+                    }
                 }
-                return $id; # ???
-            }
-        }
-        
-
-        # we have a suitable unique key - all the
-        # column/attribute values are set in this
-        # node. let's check if this node is in
-        # the database by querying using the
-        # unique constraint
-        my $sql =
-          $self->makesql($element,
-                         \%constr,
-                         $select_col);
-        trace(0, "SQL: $sql");
-        my $vals =
-          $dbh->selectcol_arrayref($sql);
-
-        if (@$vals) {
-            # yes it does exist in DB; we shall do
-            # an update, and we shall use the current
-            # unique key as the update constraint
-            %update_constr = %constr;
-            if ($pkcol) {
-                # this is the value we return at the
-                # end
-                $id = $vals->[0];
-                if ($remap{$pkcol}) {
-                    #my $colvalmap = $self->get_mapping_for_col($pkcol);
-                    my $colvalmap = $self->id_remap_idx;
-                    #my $colvalmap = $self->get_mapping_for_col($element);
-                    $colvalmap->{$remap{$pkcol}} = $id;
-                    trace(0, "COLVALMAP $pkcol $remap{$pkcol} = $id");
+                if (%store_hash) {
+                    my @x = keys %store_hash;
+                    trace(0, "WILL STORE: @x");
+                }
+                else {
+                    trace(0, "UNCHANGED - WILL NOT STORE; store_hash empty");
                 }
             }
-            # we have a suitable update constraint;
-            # ignore any other unique keys
-            last;
+            else {
+            }
         }
-    } # -- end of @usets loop
-    # condition: we have found our %update_constr OR we are doing insert
+        # -- END OF CACHING CHECK --
+
+        # -- GET PK VAL $id BASED ON unique_constr --
+        # (we may already have this based on memory-cache)
+        if (!$id) {
+
+            # the input node contains all the keys in %update_constr
+            # - check to see if this relation exists in the DB
+
+            my $vals;
+            if ($is_caching_on >= 2) {
+                $vals = [];
+            }
+            else {
+                my $sql =
+                  $self->makesql($element,
+                                 \%unique_constr,
+                                 $select_col);
+                trace(0, "SQL: $sql");
+                $vals =
+                  $dbh->selectcol_arrayref($sql);
+            }
+
+            if (@$vals) {
+                # yes it does exist in DB; check if there is a
+                # pkcol - if there is, it means we can do an
+                # update and 
+                if ($pkcol && $select_col && $select_col eq $pkcol) {
+                    # this is the value we return at the
+                    # end
+                    $id = $vals->[0];
+                    if ($remap{$pkcol}) {
+                        #my $colvalmap = $self->get_mapping_for_col($pkcol);
+                        my $colvalmap = $self->id_remap_idx;
+                        #my $colvalmap = $self->get_mapping_for_col($element);
+                        $colvalmap->{$remap{$pkcol}} = $id;
+                        trace(0, "COLVALMAP $pkcol $remap{$pkcol} = $id");
+                    }
+                }
+                else {
+                    # $id not set, but we will later perform an update anyway
+                }
+            }
+            else {
+                # this node is not in the DB; force insert
+                %unique_constr = ();
+            }
+        }
+    } # end of get pk val
 
     # ---- UPDATE OR INSERT -----
     # at this stage we know if we are updating
     # or inserting, depending on whether a suitable
     # update constraint has been found
 
-    if (%update_constr) {
+    if (%unique_constr) {
         # ** UPDATE **
         if ($self->noupdate_h->{$element}) {
             if ($tracekeyval) {
@@ -1412,7 +1487,7 @@ sub _storenode {
             }
             trace(0, sprintf("NOUPDATE on %s OR child nodes (We have %s)",
                              $element,
-                             join('; ',values %update_constr)
+                             join('; ',values %unique_constr)
                             ));
             # don't return yet; there are still the delayed nodes
             ##return $id;
@@ -1420,30 +1495,33 @@ sub _storenode {
         else {
             # if there are no fields modified,
             # no change
-            foreach (keys %update_constr) {
+            foreach (keys %unique_constr) {
                 # no point setting any column
                 # that is part of the update constraint
                 delete $store_hash{$_};
             } 
             
+            # only update if there are cols set that are
+            # not part of unique constraint
             if (%store_hash) {
                 if ($tracekeyval) {
                     printf STDERR "UPDATE: $tracenode = $tracekeyval\n"
                 }
+
                 $self->updaterow($element,
                                  \%store_hash,
-                                 \%update_constr);
+                                 \%unique_constr);
                 # -- CACHE RESULTS --
-                if ($is_caching_on) {
+                if ($is_caching_on == 1 || $is_caching_on == 3) {
                     $self->update_cache($element,
                                         \%store_hash,
-                                        \%update_constr);
+                                        \%unique_constr);
                 }
             }
             else {
                 trace(0, sprintf("NOCHANGE on %s (We have %s)",
                                  $element,
-                                 join('; ',values %update_constr)
+                                 join('; ',values %unique_constr)
                             ));
                 if ($tracekeyval) {
                     printf STDERR "NOCHANGE: $tracenode = $tracekeyval\n"
@@ -1475,7 +1553,9 @@ sub _storenode {
                 $cache_hash{$pkcol} = $id;
             }
             $self->insert_into_cache($element,
-                                     \%cache_hash);
+                                     \%cache_hash,
+                                     \@usets);
+            trace(0, "CACHING: $element");
         }
 
     }  # -- end of UPDATE/INSERT
@@ -1514,26 +1594,7 @@ sub _storenode {
     return $id;
 }
 
-
-
-#sub rmake_cons {
-#    my $node = shift;
-
-#    if ($node->element eq 'composite') {
-#	my $first = $node->getnode_first;
-#	my $second = $node->getnode_second;
-#	my $head = rmake_cons($first->data->[0]);
-#	my $tail = rmake_cons($second->data->[0]);
-#	return [$head, $tail];
-#    }
-#    elsif ($node->element eq 'leaf') {
-#	my $tn = $node->get_name;
-#	return $tn;
-#    }
-#    else {
-#	die;
-#    }
-#}
+# -- QUERYING --
 
 sub rmake_nesting {
     my $node = shift;
@@ -2614,27 +2675,29 @@ sub insertrow {
     my ($table, $colvalh, $pkcol) = @_;
       
     my @cols = keys %$colvalh;
+    my @vals = 
+      map {
+          defined($_) ? $self->quote($colvalh->{$_}) : 'NULL'
+      } @cols;
     my $sql =
       sprintf("INSERT INTO %s (%s) VALUES (%s)",
               $table,
               join(", ", @cols),
-              join(", ",
-                   map {
-                       defined($_) ? $self->quote($colvalh->{$_}) : 'NULL'
-                   } @cols),
+              join(", ", @vals),
              );
     if (!@cols) {
 	$sql = "INSERT INTO $table DEFAULT VALUES";
     }
 
     trace(0, "SQL:$sql");
+    my $rval;
     eval {
-	my $rval = $self->dbh->do($sql);
+        $rval = $self->dbh->do($sql);
     };
     if ($@) {
 	if ($self->force) {
 	    # what about transactions??
-	    $self->warn("WARNING: $@");
+	    $self->warn("IN SQL: $sql\nWARNING: $@");
 	}
 	else {
 	    confess $@;
@@ -2658,6 +2721,7 @@ sub insertrow {
                 $pkval  = $self->selectval("select max($pkcol) from $table");        
             }
         }
+        trace(0, "PKVAL = $pkval");
     }
     return $pkval;
 }
@@ -2694,7 +2758,7 @@ sub updaterow {
             $set =
               [
                map {
-                   push(@bind, $set->{$_});
+                   push(@bind, defined $set->{$_} ? $set->{$_} : 'NULL');
                    "$_ = ?"
                } keys %$set
               ];
@@ -2710,7 +2774,7 @@ sub updaterow {
               join(', ', @$set),
               join(' AND ', @$where),
              );
-    trace(0, "SQL:$sql [@bind]");
+    trace(0, "SQL:$sql [",join(', ',@bind)."]");
 
     my $sth = $dbh->prepare($sql) || confess($sql."\n\t".$dbh->errstr);
     return $sth->execute(@bind) || confess($sql."\n\t".$sth->errstr);
@@ -3059,6 +3123,24 @@ sub rearrange {
   return @return_array;
 }
 
+#sub loadschema {
+#    my $self = shift;
+#    my ($ddl, $ddlf, $dialect) = 
+#      rearrange([qw(ddl ddlf dialect)], @_);
+#    if ($ddlf) {
+#        my $fh = FileHandle->new($ddlf) || $self->throw("no file $ddlf");
+#        $ddl = join('',<$fh>);
+#        $fh->close;
+#    }
+#    $self->throw("no DDL") unless $ddl;
+#    if ($dialect) {
+#        my $driver = $self->{_driver} || 'Pg';
+#        if ($driver ne $dialect) {
+            
+#        }
+#    }
+#}
+
 1;
 
 __END__
@@ -3121,18 +3203,26 @@ __END__
     foreach(@allstars);
 
   $dbh->storenode($dataset);
+  exit 0;
 
 Or from the command line:
 
-  unix> selectall_xml -d 'dbi:Pg:dbname=spybase' 'SELECT * FROM studio NATURAL JOIN movie'
+  unix> selectall_xml.pl -d 'dbi:Pg:dbname=moviebase'     \
+       'SELECT * FROM studio NATURAL JOIN movie NATURAL   \
+          JOIN movie_to_star NATURAL JOIN star            \
+          USE NESTING (set(studio(movie(star))))'
+
+Or using a predefined template:
+
+  unix> selectall_xml.pl -d moviebase /mdb-movie genre=sci-fi
 
 =cut
 
 =head1 DESCRIPTION
 
-This module is for mapping from databases to Stag objects (Structured
-Tags - see L<Data::Stag>), which can also be represented as XML. It
-has two main uses:
+This module is for mapping between relational databases and Stag
+objects (Structured Tags - see L<Data::Stag>). Stag objects can also
+be represented as XML. The module has two main uses:
 
 =over
 
@@ -3145,7 +3235,9 @@ looking at the SQL query and introspecting the database schema, rather
 than requiring metadata or an object model.
 
 In this respect, the module works just like a regular L<DBI> handle, with
-some extra methods provided.
+a few extra methods.
+
+Queries can also make use of predefined B<templates>
 
 =item Storing Data
 
@@ -3161,17 +3253,22 @@ XML can also be imported, and a relational schema automatically generated.
 For a tutorial on using DBStag to build and query relational databases
 from XML sources, please see L<DBIx::DBStag::Cookbook>
 
-=head2 HOW QUERYING WORKS
+=head2 HOW QUERY RESULTS ARE TURNED INTO STAG/XML
 
 This is a general overview of the rules for turning SQL query results
-into a tree like data structure.
+into a tree like data structure. You don't need to understand all
+these rules to be able to use this module - you can experiment by
+using the B<selectall_xml.pl> script which comes with this
+distribution.
 
-=head3 Relations
+=head3 Mapping Relations
 
 Relations (i.e. tables and views) are elements (nodes) in the
 tree. The elements have the same name as the relation in the database.
 
-=head3 Columns
+These nodes are always non-terminal (ie they always have child nodes)
+
+=head3 Mapping Columns
 
 Table and view columns of a relation are sub-elements of the table or
 view to which they belong. These elements will be B<data elements>
@@ -3184,17 +3281,18 @@ For example, the following query
 
 will return a data structure that looks like this:
 
-  (person
-   (name "fred")
-   (job "forklift driver"))
-  (person
-   (name "joe")
-   (job "steamroller mechanic"))
+  (set
+   (person
+    (name "fred")
+    (job "forklift driver"))
+   (person
+    (name "joe")
+    (job "steamroller mechanic")))
 
 The data is shown as a lisp-style S-Expression - it can also be
 expressed as XML, or manipulated as an object within perl.
 
-=head3 Table aliases
+=head3 Handling table aliases
 
 If an ALIAS is used in the FROM part of the SQL query, the relation
 element will be nested inside an element with the same name as the
@@ -3204,9 +3302,10 @@ alias. For instance, the query
 
 Will return a data structure like this:
 
-  (author
-   (person
-    (name "Philip K Dick")))
+  (set
+   (author
+    (person
+     (name "Philip K Dick"))))
 
 The underlying assumption is that aliasing is used for a purpose in
 the original query; for instance, to determine the context of the
@@ -3219,16 +3318,17 @@ relation where it may be ambiguous.
 
 Will generate a nested result structure similar to this -
 
-  (employee
-   (person
-    (person_id "...")
-    (name "...")
-    (foo  "...")
-    (boss
-     (person
-      (person_id "...")
-      (name "...")
-      (foo  "...")))))
+  (set
+   (employee
+    (person
+     (person_id "...")
+     (name "...")
+     (salary  "...")
+     (boss
+      (person
+       (person_id "...")
+       (name "...")
+       (salary  "..."))))))
 
 If we neglected the alias, we would have 'person' directly nested
 under 'person', and the meaning would not be obvious. Note how the
@@ -3251,7 +3351,8 @@ instead of
 The main utility of querying using this module is in retrieving the
 nested relation elements from the flattened query results. Given a
 query over relations A, B, C, D,... there are a number of possible
-tree structures. Not all of the tree structures are meaningful.
+tree structures. Not all of the tree structures are meaningful or
+useful.
 
 Usually it will make no sense to nest A under B if there is no foreign
 key relationship linking either A to B, or B to A. This is not always
@@ -3270,7 +3371,7 @@ relation element preceeding it in the FROM clause; for instance:
   SELECT * FROM a NATURAL JOIN b NATURAL JOIN c
 
 If there are appropriately named foreign keys, the following data will
-be returned (assuming one row in each of a, b and c)
+be returned (assuming one column 'x_foo' in each of a, b and c)
 
   (set
    (a
@@ -3287,9 +3388,6 @@ table a, DBStag will not detect this - you have to guide it. There are
 two ways of doing this - you can guide by bracketing your FROM clause
 like this:
 
-  !!##
-  !!## NOTE - THIS PART IS NOT SET IN STONE - THIS MAY CHANGE
-  !!## 
   SELECT * FROM (a NATURAL JOIN b) NATURAL JOIN c
 
 This will generate
@@ -3334,7 +3432,7 @@ like.
 If you are using the DBStag API directly, you can pass in the nesting
 structure as an argument to the select call; for instance:
 
-  my $seq =
+  my $xmlstr =
     $dbh->selectall_xml(-sql=>q[SELECT * 
                                 FROM a NATURAL JOIN b 
                                      NATURAL JOIN c],
@@ -3342,7 +3440,7 @@ structure as an argument to the select call; for instance:
 
 or the equivalent -
 
-  my $seq =
+  my $xmlstr =
     $dbh->selectall_xml(q[SELECT * 
                           FROM a NATURAL JOIN b 
                                NATURAL JOIN c],
@@ -3364,7 +3462,7 @@ the SQL level) -
                                     </set>
                                    ]);
 
-As you can see, this is a little more verbose.
+As you can see, this is a little more verbose than the S-Expression
 
 Most command line scripts that use this module should allow
 pass-through via the '-nesting' switch.
@@ -3375,13 +3473,13 @@ If you alias a function or an expression, DBStag needs to know where
 to put the resulting column; the column must be aliased.
 
 This is inferred from the first named column in the function or
-expression; for example, in the SQL below
+expression; for example, the SQL below uses the minus function:
 
-  SELECT blah.*, foo.*, foo.x - foo.y AS z
+  SELECT blah.*, foo.*, foo.x-foo.y AS z
 
 The B<z> element will be nested under the B<foo> element
 
-You can force different nesting using a double underscore:
+You can force different nesting using a B<double underscore>:
 
   SELECT blah.*, foo.*, foo.x - foo.y AS blah__z
 
@@ -3404,7 +3502,12 @@ The schema for the resulting Stag structures can be seen to conform to
 a schema that is dynamically determined at query-time from the
 underlying relational schema and from the specification of the query itself.
 
+If you need to generate a DTD you can ause the B<stag-autoschema.pl>
+script, which is part of the L<Data::Stag> distribution
+
 =head1 QUERY METHODS
+
+The following methods are for using the DBStag API to query a database
 
 =head2 connect
 
@@ -3412,7 +3515,9 @@ underlying relational schema and from the specification of the query itself.
   Returns - L<DBIx::DBStag>
   Args    - see the connect() method in L<DBI>
 
-=cut
+This will be the first method you call to initiate a DBStag object
+
+The DSN may be a standard DBI DSN, or it can be a DBStag alias
 
 =head2 selectall_stag
 
@@ -3481,7 +3586,7 @@ DBI->selectall_arrayref(). The main reason to use this over the direct
 DBI method is to take advantage of other stag functionality, such as
 templates
 
-=head2 prepare_stag SEMI-PRIVATE METHOD
+=head2 prepare_stag PRIVATE METHOD
 
  Usage   - $prepare_h = $dbh->prepare_stag(-template=>$template);
  Returns - hashref (see below)
@@ -3503,15 +3608,21 @@ Returns a hashref
 
 =head1 STORAGE METHODS
 
+The following methods are for using the DBStag API to store nested
+data in a database
+
 =head2 storenode
 
   Usage   - $dbh->storenode($stag);
   Returns - 
   Args    - L<Data::Stag>
 
+SEE ALSO: The B<stag-storenode.pl> script
+
 Recursively stores a stag tree structure in the database.
 
-The database schema is introspected for most of the mapping data.
+The database schema is introspected for most of the mapping data, but
+you can supply your own (see later)
 
 Before a node is stored, certain subnodes will be pre-stored; these are
 subnodes for which there is a foreign key mapping FROM the parent node
@@ -3529,8 +3640,10 @@ Subsequently, all subnodes that were not pre-stored are now
 post-stored.  The primary key for the existing node will become
 foreign keys for the post-stored subnodes.
 
-Before storage, all node names are made dbsafe; they are lowercased,
-and the following transform is applied:
+=head3 Database table and column name restrictions
+
+Before storage, all node names are made B<DB-safe>; they are
+lowercased, and the following transform is applied:
 
   tr/a-z0-9_//cd;
 
@@ -3609,12 +3722,89 @@ this will not be updated; subnodes will not be stored
   Args    - bool (optional)
 
 The default behaviour of the storenode() method is to remap all
-primary key values it comes across (for example, unique internal
-surrogate IDs from one database may not correspond to the IDs in
-another database).
+B<surrogate> PRIMARY KEY values it comes across.
 
-If this accessor is set to non-zero (true) then the primary key values
-in the XML will be used
+A surrogate primary key is typically a primary key of type SERIAL (or
+AUTO_INCREMENT) in MySQL. They are identifiers assigned automatically
+be the database with no semantics.
+
+It may be desirable to store the same data in two different
+databases. We would generally not expect the surrogate IDs to match
+between databases, even if the rest of the data does.
+
+(If you do not use surrogate primary key columns in your load xml,
+then you can ignore this accessor)
+
+If you use primary key columns in your XML, and the primary keys are
+not surrogate, then youshould set this.  If this accessor is set to
+non-zero (true) then the primary key values in the XML will be used.
+
+If your db has surrogate/auto-increment/serial PKs, and you wish to
+use these PK columns in your XML, yet you want to make XML that can be
+exported from one db and imported into another, then the default
+behaviour will be fine.
+
+For example, if we extract a 'person' from a db with surrogate PK
+B<id> and unique key B<ssno>, we may get this:
+
+  <person>
+    <id>23</id>
+    <name>fred</name>
+    <ssno>1234-567</ssno>
+  </person>
+
+If we then import this into an entirely fresh db, with no rows in
+table B<person>, then the default behaviour of storenode() will create a
+row like this:
+
+  <person>
+    <id>1</id>
+    <name>fred</name>
+    <ssno>1234-567</ssno>
+  </person>
+
+The PK val 23 has been mapped to 1 (all foreign keys that point to
+person.id=23 will now point to person.id=1)
+
+If we were to first call $sdbh->trust_primary_key_values(1), then
+person.id would remain to be 23. This would only be appropriate
+behaviour if we were storing back into the same db we retrieved from.
+
+=head2 is_caching_on B<ADVANCED OPTION>
+
+  Usage   - $dbh->is_caching_on('person', 1)
+  Returns - number
+  Args    - number
+                   0: off (default)
+                   1: memory-caching ON
+                   2: memory-caching OFF, bulkload ON
+                   3: memory-caching ON, bulkload ON
+
+IN-MEMORY CACHING
+
+By default no in-memory caching is used. If this is set to 1,
+then an in-memory cache is used for any particular element. No cache
+management is used, so you should be sure not to cache elements that
+will cause memory overloads.
+
+Setting this will not affect the final result, it is purely an
+efficiency measure for use with storenode().
+
+The cache is indexed by all unique keys for that particular
+element/table, wherever those unique keys are set
+
+BULKLOAD
+
+If bulkload is used without memory-caching (set to 2), then only
+INSERTs will be performed for this element. Note that this could
+potentially cause a unique key violation, if the same element is
+present twice
+
+If bulkload is used with memory-caching (set to 3) then only INSERTs
+will be performed; the unique serial/autoincrement identifiers for
+those inserts will be cached and used. This means you can have the
+same element twice. However, the load must take place in one session,
+otherwise the contents of memory will be lost
 
 =cut
 
@@ -3665,6 +3855,12 @@ Requires resources to be set up (see below)
 =cut
 
 =head1 RESOURCES
+
+Generally when connecting to a database, it is necessary to specify a
+DBI style DSN locator. DBStag also allows you specify a B<resource
+list> file which maps logical names to full locators
+
+The following methods allows you to use a resource list
 
 =head2 resources_list
 
@@ -3766,16 +3962,15 @@ CREATE TABLE statements.
 =item DBSTAG_TRACE
 
 setting this environment will cause all SQL statements to be printed
-on STDERR
+on STDERR, as well as a full trace of how nodes are stored
 
 =back
 
 =head1 BUGS
 
-This is alpha software! Probably several bugs.
-
 The SQL parsing can be quite particular - sometimes the SQL can be
-parsed by the DBMS but not by DBStag. The error messages are not always helpful.
+parsed by the DBMS but not by DBStag. The error messages are not
+always helpful.
 
 There are probably a few cases the SQL SELECT parsing grammar cannot deal with.
 
@@ -3802,7 +3997,7 @@ L<http://stag.sourceforge.net>
 
 =head1 AUTHOR
 
-Chris Mungall <F<cjm@fruitfly.org>>
+Chris Mungall <F<cjm AT fruitfly DOT org>>
 
 =head1 COPYRIGHT
 
