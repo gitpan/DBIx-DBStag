@@ -1,4 +1,4 @@
-# $Id: DBStag.pm,v 1.24 2004/04/02 21:12:25 cmungall Exp $
+# $Id: DBStag.pm,v 1.31 2004/07/15 19:14:29 cmungall Exp $
 # -------------------------------------------------------
 #
 # Copyright (C) 2002 Chris Mungall <cjm@fruitfly.org>
@@ -22,7 +22,7 @@ use DBIx::DBSchema;
 use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION='0.03';
+$VERSION="0.04";
 
 
 our $DEBUG;
@@ -119,13 +119,19 @@ sub resolve_dbi {
     if (!$dbi) {
 	$self->throw("database name not provided!");
     }
-    if ($dbi !~ /[;:]/) {
+    if ($dbi !~ /^dbi:/) {
 	my $rh = $self->resources_hash;
 	my $res = 
 	  $rh->{$dbi};
 	if (!$res) {
-	    $res =
-	      {loc=>"Pg:$dbi"};
+	    if ($dbi =~ /:/) {
+		$res =
+		  {loc=>"$dbi"}
+	    }
+	    else {
+		$res =
+		  {loc=>"Pg:$dbi"};
+	    }
 	}
 	if ($res) {
 	    my $loc = $res->{loc};
@@ -423,9 +429,51 @@ sub get_unique_sets {
     return @{$tableobj->unique->lol_ref || []};
 }
 
+sub mapconf {
+    my $self = shift;
+    my $fn = shift;
+    my $fh = FileHandle->new($fn) || confess("cannot open $fn");
+    my @mappings = <$fh>;
+    $fh->close;
+    $self->mapping(\@mappings);
+}
+
 sub mapping {
     my $self = shift;
-    $self->{_mapping} = shift if @_;
+    if (@_) {
+	my $ml = shift;
+	my @nu =
+	  map {
+	      if (ref($_)) {
+		  Data::Stag->nodify($_);
+	      }
+	      else {
+		  if (/^(\w+)\/(\w+)\.(\w+)=(\w+)\.(\w+)/) {
+		      Data::Stag->new(map=>[
+					    [fktable_alias=>$1],
+					    [table=>$2],
+					    [col=>$3],
+					    [fktable=>$4],
+					    [fkcol=>$5]
+					   ]);
+		  }
+		  elsif (/^(\w+)\.(\w+)=(\w+)\.(\w+)/) {
+		      Data::Stag->new(map=>[
+					    [table=>$1],
+					    [col=>$2],
+					    [fktable=>$3],
+					    [fkcol=>$4]
+					   ]);
+		  }
+		  else {
+		      confess("incorrectly specified mapping: $_".
+			      "(must be alias/tbl.col=ftbl.fcol)");
+		      ();
+		  }
+	      }
+	  } @$ml;
+	$self->{_mapping} = \@nu;
+    }
     return $self->{_mapping};
 }
 
@@ -622,6 +670,7 @@ sub autoddl {
     my $self = shift;
     my $stag = shift;
     my $link = shift;
+    $stag->makeattrsnodes;
     my $schema = $stag->autoschema;
     $self->source_transforms([]);;
     $self->_autoddl($schema, undef, $link);
@@ -693,7 +742,7 @@ sub _autoddl {
             grep {$_ eq $tbl} @$link) {
             my $ftbl = $_->element;
             push(@cols,
-                 sprintf("%s_id int", $ftbl));
+                 sprintf("%s_id INT", $ftbl));
             push(@cols,
                  sprintf("FOREIGN KEY (%s_id) REFERENCES $ftbl(%s_id)$casc", $ftbl, $ftbl));
             $pre_ddl .= $self->_autoddl($_, undef, $link, $tbls);
@@ -816,6 +865,17 @@ sub policy_freshbulkload {
     $self->{_policy_freshbulkload} = shift if @_;
     return $self->{_policy_freshbulkload};
 }
+sub noupdate_h {
+    my $self = shift;
+    $self->{_noupdate_h} = shift if @_;
+    return $self->{_noupdate_h} || {};
+}
+sub tracenode {
+    my $self = shift;
+    $self->{_tracenode} = shift if @_;
+    return $self->{_tracenode};
+}
+
 sub mapgroups {
     my $self = shift;
     if (@_) {
@@ -831,11 +891,36 @@ sub mapgroups {
     }
     return @{$self->{_mapgroups} || []};
 }
+
+# DEPRECATED
 sub get_mapping_for_col {
     my $self = shift;
     my $col = shift;
+    $self->{_colvalmap}->{$col} = {} 
+      unless $self->{_colvalmap}->{$col};
     return $self->{_colvalmap}->{$col};
 }
+
+# mapping of Old ID => New ID
+# IDs are assumed to be global across ALL tables
+sub id_remap_idx {
+    my $self = shift;
+    if (@_) {
+        $self->{_id_remap_idx} = shift;
+    }
+    else {
+        $self->{_id_remap_idx} = {}
+          unless $self->{_id_remap_idx};
+    }
+    return $self->{_id_remap_idx};
+}
+
+sub trust_primary_key_values {
+    my $self = shift;
+    $self->{_trust_primary_key_values} = shift if @_;
+    return $self->{_trust_primary_key_values};
+}
+
 
 sub make_stag_node_dbsafe {
     my $self = shift;
@@ -913,9 +998,25 @@ sub storenode {
 sub _storenode {
     my $self = shift;
     my $node = shift;
+    if (!$node) {
+        confess("you need to pass in a node!");
+    }
     my $element = $node->element;
-
-    trace(0, "STORING\n", $node->xml);
+    if ($element eq 'dbstag_metadata') {
+        my @maps = $node->get_map;
+        $self->mapping(\@maps);
+        return;
+    }
+    trace(0, "STORING $element\n", $node->xml);
+    my $tracenode = $self->tracenode || '';
+    my $tracekeyval;
+    if ($tracenode && $tracenode =~ /^(\w+)\/(.*)/) {
+        my $nn = $1;
+        my $tag = $2;
+        if ($nn eq $element) {
+            $tracekeyval = $node->get($tag);
+        }
+    }
 
     my $dbh = $self->dbh;
     my $dbschema = $self->dbschema;
@@ -953,33 +1054,56 @@ sub _storenode {
           grep { 
               $_->get_table eq $element &&
                 ($_->get_fktable_alias eq $nt->element ||
-                 $_->get_fktable eq $nt->element)
-              } @$mapping;
+                 ($_->get_fktable eq $nt->element && !$_->get_fktable_alias))
+            } @$mapping;
         # check to see if sub-element has FK to this element
         if (!$map) {
 #            my $subtable = $dbschema->table($nt->element);
             my $table = $dbschema->table($element);
-            my $subpkcol = $self->get_pk_col($nt->element);
+            my $ntelement = $nt->element;
+            my $subpkcol = $self->get_pk_col($ntelement);
             
-            # HACK - ASSUME NATURAL JOIN
             my @cns = $table->columns;
-#            my @subcns = $subtable->columns;
-#            my %subcnh = map {$_=>1} @subcns;
-            my @match = grep {
-                $_ eq $subpkcol;
-            } @cns;
-            if (@match) {
-                my $cn = shift @match;
-                confess if @match;
+
+            my $cn;    # col name (FK in current element)
+            my $fcn;   # foreign col name (PK in sub element)
+
+            # HACK - ASSUME NATURAL JOIN
+            # for example, a FK: person.dept_id => dept.dept_id
+            if ($subpkcol ne 'id') {
+                foreach (@cns) {
+                    if ($_ eq $subpkcol) {
+                        $cn = $_;
+                        $fcn = $_;
+                    }
+                }
+            }
+
+            # second chance; allow base "id" style
+            # for example, a FK: person.dept_id => dept.id
+            # via <person><dept>...</dept></person>
+            if (!$cn) {
+                if ($subpkcol eq 'id') {
+                    foreach (@cns) {
+                        if ($_ eq $ntelement."_id") {
+                            $cn = $_;
+                            $fcn = 'id';
+                        }
+                    }
+                }
+            }
+            if ($cn) {
                 $map =
                   Data::Stag->new(map=>[
                                         [table=>$element],
                                         [col=>$cn],
                                         [fktable=>$nt->element],
-                                        [fkcol=>$cn]
+                                        [fkcol=>$fcn]
                                        ]);
             }
         }
+
+        # if $map is set, then we have to pre-store this subnode
         if ($map) {
             # 1:many between this and child
             # (eg this has fk to child)
@@ -992,11 +1116,29 @@ sub _storenode {
             # aliases map an extra table
             # eg table X col X.A => Y.B
             # fktable_alias = A
-            #
             my $fktable_alias = $map->get_fktable_alias;
             my $orig_nt = $nt;
+
+            # if we have an alias, it means the actual node
+            # we want to store is one beneath the alias;
+            # eg <foo><alias><foo2>..</foo2></alias></foo>
+            # we want to actually store the node foo2
             if ($fktable_alias) {
-                ($nt) = $nt->sgetnode($map->sget_fktable);
+                my @nts = $nt->sgetnode($map->sget_fktable);
+                if (!@nts) {
+                    print STDERR $nt->sxpr;
+                    confess("could not get node for: ".$map->sget_fktable);
+                }
+                if (@nts > 1) {
+                    print STDERR $nt->sxpr;
+                    confess("multiple nodes for: ".$map->sget_fktable);
+                }
+                $nt = shift @nts;
+                if (!$nt) {
+                    print STDERR $map->sxpr;
+                    print STDERR $orig_nt->sxpr;
+                    confess("bad nodes for: ".$map->sget_fktable);
+                }
             }
             my $fk_id = $self->_storenode($nt);
             if (!defined($fk_id)) {
@@ -1004,15 +1146,15 @@ sub _storenode {
                         "trying to store: $element\n".
                         "no fk returned when storing: $fktable");
             }
+            trace(0, "SETTING $element.$col=$fk_id [via ".$orig_nt->element."]");
             $node->set($col, $fk_id);
             $node->unset($orig_nt->element);
-            trace(0, $node->xml);
         }
         else {
             # 1:many between child and this
             # (eg child has fk to this)
             # store child after
-            trace(0, "DELAYED STORE:\n", $nt->xml);
+            trace(0, "WILL STORE LATER:\n", $nt->xml);
             $node->unset($nt->element);
             push(@delayed_store, $nt);
         }
@@ -1021,28 +1163,36 @@ sub _storenode {
     # --- done storing kids
 
     # --- replace *IDs ---
+    # dbstag XML allows placeholder values in primary key cols
+    # (for now PKs are always assumed to be autoincrement/serial ints)
+    # placeholder PKs get remapped to a new autogenerated ID
+    # all FKs refering to this get remapped too
     my @tnodes = $node->tnodes;
-    my %remap = ();
-    foreach my $tnode (@tnodes) {
-        my $colvalmap = $self->get_mapping_for_col($tnode->name);
-        if ($colvalmap) {
-            my $v = $tnode->data;
-            my $nv = $colvalmap->{$v};
-            if ($nv) {
-                trace(0, "remapping $v => $nv");
-                $tnode->data($nv);
-            }
-            else {
-#                if ($tnode->name eq $pkcol && $v =~ /^\*/) {
-                if ($tnode->name eq $pkcol) {
-                    trace(0, "will remap $pkcol: $v");
-                    $remap{$tnode->name} = $v;
-                    $node->unset($tnode->name);
+    my %remap = ();   # indexed by column name; new PK value
+    unless ($self->trust_primary_key_values) {
+        foreach my $tnode (@tnodes) {
+            if ($tnode->name eq $pkcol) {
+                my $v = $tnode->data;
+                trace(0, "REMAP $pkcol: $v => ? [do not know new value yet]");
+                $remap{$tnode->name} = $v; # map after insert/update
+                $node->unset($tnode->name); # discard placeholder
+            } else {
+                if ($tnode->name =~ /_id$/) {
+                    # hack!! need proper FK refs...
+                    my $colvalmap = $self->id_remap_idx;
+                    #my $colvalmap = $self->get_mapping_for_col($nt->elememt);
+                    if ($colvalmap) {
+                        my $v = $tnode->data;
+                        my $nv = $colvalmap->{$v};
+                        if ($nv) {
+                            trace(0, "remapping $v => $nv");
+                            $tnode->data($nv);
+                        }
+                    }
                 }
             }
         }
-    }
-
+    }  # -- end of ID remapping
     
     # --- Get columns that need updating/inserting ---
     # turn all remaining tag-val pairs into a hash
@@ -1059,7 +1209,7 @@ sub _storenode {
                 "These elements need to be mapped via FKs: ".
                 join(', ', map {"\"@refcols\""} @refcols).
                 "\n\nPerhaps you need to specify more schema metadata?");
-    }
+    } # -- end of sanity check
 
     # each relation has zero or more unique keys;
     # unique keys may be compound (ie >1 column)
@@ -1101,7 +1251,8 @@ sub _storenode {
             $id = $pk_id;
             trace(0, "SETTING UPDATE CONSTR BASED ON PK $pkcol = $pk_id");
         }
-    }
+    } # -- end of xxxx
+
 
     #        foreach my $sn ($node->kids) {
     #            my $name = $sn->element;
@@ -1141,13 +1292,20 @@ sub _storenode {
         # we already know & have the primary key
         last if %update_constr;
 
+        # if we are loading up a fresh/blank slate
+        # database then we don't need to check for
+        # existing tuples, as everything should
+        # have been inserted/updated this session
+        if ($self->policy_freshbulkload) {
+            next;
+        }
+
         # already tried PK
 #        if (scalar(@$uset) == 1 && 
 #            $uset->[0] eq $pkcol) {
 #            next;
 #        }
         trace(0, "TRYING USET: @$uset;; [pk=$pkcol]");
-        trace(0, $node->xml);
 
         # get the values of the unique key columns
         my %constr =
@@ -1196,17 +1354,13 @@ sub _storenode {
                 if ($pkcol) {
                     $id = $cached_colvals{$pkcol};
                 }
-                return $id;
+                if ($tracekeyval) {
+                    printf STDERR "IGNORING CACHED: $tracenode = $tracekeyval\n"
+                }
+                return $id; # ???
             }
         }
         
-        # if we are loading up a fresh/blank slate
-        # database then we don't need to check for
-        # existing tuples, as everything should
-        # have been inserted/updated this session
-        if ($self->policy_freshbulkload) {
-            next;
-        }
 
         # we have a suitable unique key - all the
         # column/attribute values are set in this
@@ -1231,16 +1385,19 @@ sub _storenode {
                 # end
                 $id = $vals->[0];
                 if ($remap{$pkcol}) {
-                    my $colvalmap = $self->get_mapping_for_col($pkcol);
+                    #my $colvalmap = $self->get_mapping_for_col($pkcol);
+                    my $colvalmap = $self->id_remap_idx;
+                    #my $colvalmap = $self->get_mapping_for_col($element);
                     $colvalmap->{$remap{$pkcol}} = $id;
-                    trace(0, "colvalmap $remap{$pkcol} = $id");
+                    trace(0, "COLVALMAP $pkcol $remap{$pkcol} = $id");
                 }
             }
             # we have a suitable update constraint;
             # ignore any other unique keys
             last;
         }
-    }
+    } # -- end of @usets loop
+    # condition: we have found our %update_constr OR we are doing insert
 
     # ---- UPDATE OR INSERT -----
     # at this stage we know if we are updating
@@ -1248,40 +1405,64 @@ sub _storenode {
     # update constraint has been found
 
     if (%update_constr) {
-
         # ** UPDATE **
-
-        # if there are no fields modified,
-        # no change
-        foreach (keys %update_constr) {
-            # no point setting any column
-            # that is part of the update constraint
-            delete $store_hash{$_};
-        } 
-
-        if (%store_hash) {
-            $self->updaterow($element,
-                             \%store_hash,
-                             \%update_constr);
-            # -- CACHE RESULTS --
-            if ($is_caching_on) {
-                $self->update_cache($element,
-                                    \%store_hash,
-                                    \%update_constr);
+        if ($self->noupdate_h->{$element}) {
+            if ($tracekeyval) {
+                printf STDERR "NOUPDATE: $tracenode = $tracekeyval\n"
+            }
+            trace(0, sprintf("NOUPDATE on %s OR child nodes (We have %s)",
+                             $element,
+                             join('; ',values %update_constr)
+                            ));
+            # don't return yet; there are still the delayed nodes
+            ##return $id;
+        }
+        else {
+            # if there are no fields modified,
+            # no change
+            foreach (keys %update_constr) {
+                # no point setting any column
+                # that is part of the update constraint
+                delete $store_hash{$_};
+            } 
+            
+            if (%store_hash) {
+                if ($tracekeyval) {
+                    printf STDERR "UPDATE: $tracenode = $tracekeyval\n"
+                }
+                $self->updaterow($element,
+                                 \%store_hash,
+                                 \%update_constr);
+                # -- CACHE RESULTS --
+                if ($is_caching_on) {
+                    $self->update_cache($element,
+                                        \%store_hash,
+                                        \%update_constr);
+                }
+            }
+            else {
+                trace(0, sprintf("NOCHANGE on %s (We have %s)",
+                                 $element,
+                                 join('; ',values %update_constr)
+                            ));
+                if ($tracekeyval) {
+                    printf STDERR "NOCHANGE: $tracenode = $tracekeyval\n"
+                }
             }
         }
-
     } else {
-
         # ** INSERT **
-
         $id =
           $self->insertrow($element,
                            \%store_hash,
                            $pkcol);
+        if ($tracekeyval) {
+            printf STDERR "INSERT: $tracenode $tracekeyval [val = $id]\n"
+        }
         if ($pkcol) {
             if ($remap{$pkcol}) {
-                my $colvalmap = $self->get_mapping_for_col($pkcol);
+                my $colvalmap = $self->id_remap_idx;
+                #my $colvalmap = $self->get_mapping_for_col($element);
                 $colvalmap->{$remap{$pkcol}} = $id;
                 trace(0, "colvalmap $remap{$pkcol} = $id");
             }
@@ -1297,8 +1478,8 @@ sub _storenode {
                                      \%cache_hash);
         }
 
-    }
-
+    }  # -- end of UPDATE/INSERT
+    
 
     # -- DELAYED STORE --
     # Any non-terminal child nodes of the current one have
@@ -1313,33 +1494,23 @@ sub _storenode {
     # any of these child nodes
     if (@delayed_store) {
         foreach my $sn (@delayed_store) {
-            my $fk = $pkcol;
-
             # ASSUMPTION - FK and PK are named the same
             # WRONG????????????????
+            my $fk = $pkcol;
+
+	    # HACK - specific to databases that use 'id' for PK
+	    # and <ftable>_id for FK
+	    if ($fk eq 'id') {
+		$fk = $element . '_id';
+	    }
+
             $sn->set($fk, $id);
 
             trace(0, "NOW TIME TO STORE [curr pk val = $id] [fkcol = $fk] ", $sn->xml);
             $self->_storenode($sn);
-
-#            my ($map) =
-#              grep { 
-#                  $_->get_table eq $sn->element &&
-#                    $_->get_fktable eq $element
-#                } @$mapping;
-#            if (!$map) {
-#                $map = Data::Stag->new(fk=>[
-#                                            [fktable=>
-#            }
-#            if ($map) {
-#                my $fktable = $map->get_fktable;
-#                my $fk = $pkcol;
-#                $sn->set($fk, $id);
-
-#                $self->_storenode($sn);
-#            }
         }
-    }
+    } # -- end of @delayed_store
+
     return $id;
 }
 
@@ -1395,6 +1566,13 @@ sub last_stmt {
     $self->{_last_stmt} = shift if @_;
     return $self->{_last_stmt};
 }
+
+sub last_sql_and_args {
+    my $self = shift;
+    $self->{_last_sql_and_args} = shift if @_;
+    return $self->{_last_sql_and_args};
+}
+
 
 sub sax_handler {
     my $self = shift;
@@ -1750,7 +1928,8 @@ sub prepare_stag {
                     my $tbl = $dbschema->table(lc($baserelname));
                     if (!$tbl) {
                         confess("Don't know anything about table:$tn\n".
-                                "Maybe DBIx::DBSchema does not work for your DBMS?");
+                                "Maybe DBIx::DBSchema does not work for your DBMS?\n".
+                                "If $tn is a view, you may need to modify DBIxLLDBSchema");
                     }
                     my @cns = $tbl->columns;
                     #                  @cns = grep { !$got{$_}++ } @cns;
@@ -1822,6 +2001,7 @@ sub prepare_stag {
     }
     trace(0, "SQL:$sql");
     trace(0, "Exec_args: @exec_args") if @exec_args;
+    $self->last_sql_and_args([$sql, @exec_args]);
     return 
       {
        sth=>$sth,
@@ -2207,7 +2387,7 @@ sub reconstruct {
 *normalize = \&reconstruct;
 
 # ============================
-# make_a_tree(...)
+# make_a_tree(...) RECURSIVE
 #
 # called by: reconstruct(...)
 #
@@ -2260,10 +2440,12 @@ sub make_a_tree {
 
 	if (!$rec) {
 	    my $relationcols = $cols_by_relationname{$relationname};
+	    my $has_non_null_val = grep {defined($relationrec->{$_})} @$relationcols;
+	    return unless $has_non_null_val;
 	    my $relationstruct =
 	      $tree->new($relationname=>[
 					 map {
-					     [$_ => $relationrec->{$_}]
+					     defined($relationrec->{$_}) ? [$_ => $relationrec->{$_}] : ()
 					 } @$relationcols
 					]);
 	    my $parent_relationstruct = $parent_rec_h->{struct};
@@ -2299,7 +2481,7 @@ sub make_a_tree {
     }
     foreach ($node->subnodes) {
         $self->make_a_tree($tree,
-			   $rec, 
+			   $rec,
 			   $_,
 			   \%current_relation_h,
 			   \%pkey_by_relationname,
@@ -2649,18 +2831,20 @@ sub selectgrammar {
                      [expr => $item[1]]
                     ]) }
            | <error>
-         funccall: funcname '(' selectcols ')' 
+         funccall: funcname '(' distinct(?) selectcols ')' 
            {
             my $col = N(col=>[
                               [func => [
                                         [name => $item[1]->[1]],
-                                        [args => $item[3]]
+                                        [args => $item[4]]
                                        ]
                               ]
                              ]);
             $col;
            }
            | <error>
+
+         distinct: /distinct/i
 
 	 operator: '+' | '-' | '*' | '/' | '||'
 	   
@@ -3220,8 +3404,7 @@ The schema for the resulting Stag structures can be seen to conform to
 a schema that is dynamically determined at query-time from the
 underlying relational schema and from the specification of the query itself.
 
-=head1 CLASS METHODS
-
+=head1 QUERY METHODS
 
 =head2 connect
 
@@ -3318,13 +3501,120 @@ Returns a hashref
 
 =cut
 
+=head1 STORAGE METHODS
+
 =head2 storenode
 
   Usage   - $dbh->storenode($stag);
   Returns - 
   Args    - L<Data::Stag>
 
-Recursively stores a tree structure in the database
+Recursively stores a stag tree structure in the database.
+
+The database schema is introspected for most of the mapping data.
+
+Before a node is stored, certain subnodes will be pre-stored; these are
+subnodes for which there is a foreign key mapping FROM the parent node
+TO the child node. This pre-storage is recursive.
+
+After these nodes are stored, the current node is either INSERTed or
+UPDATEd. The database is introspected for UNIQUE constraints; these
+are used as keys. If there exists a row in the database with matching
+key, then the node is UPDATEd; otherwise it is INSERTed.
+
+(primary keys from pre-stored nodes become foreign key values in the
+existing node)
+
+Subsequently, all subnodes that were not pre-stored are now
+post-stored.  The primary key for the existing node will become
+foreign keys for the post-stored subnodes.
+
+Before storage, all node names are made dbsafe; they are lowercased,
+and the following transform is applied:
+
+  tr/a-z0-9_//cd;
+
+=head2 mapping
+
+  Usage   - $dbh->mapping(["alias/table.col=fktable.fkcol"]);
+  Returns - 
+  Args    - array
+
+Creates a stag-relational mapping (for storing data only)
+
+Occasionally not enough information can be obtained from db
+introspection; you can provide extra mapping data this way.
+
+Occasionally you stag objects/data/XML will contain aliases that do
+not correspond to actual SQL relations; the aliases are intermediate
+nodes that provide information on which foreign key column to use
+
+For example, with data like this:
+
+  (person
+   (name "...")
+   (favourite_film
+    (film (....))
+   (least_favourite_film
+    (film (....)))))
+
+There may only be two SQL tables: person and film; person would have
+two foreign key columns into film. The mapping may look like this
+
+  ["favourite_film/person.favourite_film_id=film.film_id",
+   "least_favourite_film/person.least_favourite_film_id=film.film_id"]
+
+The mapping can also be supplied in the xml that is loaded; any node
+named "dbstag_metadata" will not be loaded; it is used to supply the
+mapping. For example:
+
+  <personset>
+    <dbstag_mapping>
+      <map>favourite_film/person.favourite_film_id=film.film_id</map>
+      <map>least_favourite_film/person.least_favourite_film_id=film.film_id</map>
+    </dbstag_mapping>
+    <person>...
+
+
+=head2 mapconf
+
+  Usage   - $dbh->mapconf("mydb-stagmap.stm");
+  Returns - 
+  Args    - filename
+
+sets the conf file containing the stag-relational mappings
+
+See mapping() above
+
+The file contains line like:
+
+  favourite_film/person.favourite_film_id=film.film_id
+  least_favourite_film/person.least_favourite_film_id=film.film_id
+
+=head2 noupdate_h
+
+  Usage   - $dbh->noupdate_h({person=>1})
+  Returns - 
+  Args    - hashref
+
+Keys of hash are names of nodes that do not get updated - if a unique
+key is queried for and does not exist, the node will be inserted and
+subnodes will be stored; if the unique key does exist in the db, then
+this will not be updated; subnodes will not be stored
+
+=head2 trust_primary_key_values
+
+  Usage   - $dbh->trust_primary_key_values(1)
+  Returns - bool
+  Args    - bool (optional)
+
+The default behaviour of the storenode() method is to remap all
+primary key values it comes across (for example, unique internal
+surrogate IDs from one database may not correspond to the IDs in
+another database).
+
+If this accessor is set to non-zero (true) then the primary key values
+in the XML will be used
 
 =cut
 

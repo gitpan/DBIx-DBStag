@@ -23,13 +23,27 @@ my $select;
 my $rows;
 my $writer;
 my $verbose;
+my @order;
 my $color;
 my $out;
+my $sgml;
+
+# cmd line interpreter gets rid of quotes; need to use backspace
+my @ARGV2 = ();
+while (my $arg = shift @ARGV) {
+    while (substr($arg,-1) eq '\\' && @ARGV) {
+	my $next = shift @ARGV;
+	substr($arg,-1,1," $next");
+    }
+    push(@ARGV2,$arg);
+}
+@ARGV = @ARGV2;
 GetOptions(
            "help|h"=>\$help,
 	   "db|d=s"=>\$db,
 	   "rows"=>\$rows,
            "show"=>\$show,
+	   "sgml"=>\$sgml,
 	   "nesting|n=s"=>\$nesting,
 	   "file|f=s"=>\$file,
 	   "user|u=s"=>\$user,
@@ -38,18 +52,25 @@ GetOptions(
 	   "where|wh=s"=>\$where,
 	   "writer|w=s"=>\$writer,
 	   "select|s=s"=>\$select,
+	   "order=s@"=>\@order,
 	   "verbose|v"=>\$verbose,
            "colour|color"=>\$color,
 	   "out|o=s"=>\$out,
 	   "trace"=>\$ENV{DBSTAG_TRACE},
           );
-
 @ARGV = map { if (/^\/(.*)/) {$template_name=$1;()} else {$_} } @ARGV;
 
 
 if ($help && !$template_name && !$db) {
     system("perldoc $0");
     exit 0;
+}
+
+my $H = Data::Stag->getformathandler($writer || $ENV{STAG_WRITER} || 'xml');
+$H->use_color(1) if $color;
+if ($sgml) {
+    $rows = 1;
+    $H = Data::Stag->getformathandler('xml');
 }
 
 my $sql;
@@ -98,9 +119,10 @@ if ($help) {
 			   );
 	}
 	else {
-	    print "DESC: $desc\n";
+	    $desc =~ s/\n */\n  /mg;
+	    print "DESC:\n  $desc\n";
 	}
-	print "VARIABLES:\n";
+	print "PARAMETERS:\n";
 	foreach my $vn (@$varnames) {
 	    print "  $vn\n";
 	}
@@ -124,7 +146,7 @@ if ($help) {
 			       );
 	    }
 	    else {
-		my $desc = $template->desc;
+		my $desc = $template->desc || '';
 		$desc =~ s/\s*$//;
 		
 		printf "NAME: %s\nDESC: %s\n//\n",
@@ -152,6 +174,9 @@ if ($template) {
     if ($select) {
 	$template->set_clause(select => $select);
     }
+    if (@order) {
+	$template->set_clause(order => join(", ",@order));
+    }
 
     my @args = ();
     my %argh = ();
@@ -177,38 +202,47 @@ if ($template) {
 eval {
     if ($rows) {
         
+	my $count = 0;
         my $prep_h = $dbh->prepare_stag(@sel_args);
         my $cols = $prep_h->{cols};
         my $sth = $prep_h->{sth};
         my $exec_args = $prep_h->{exec_args};
         my $rv = $sth->execute(@$exec_args);
         while (my $r = $sth->fetchrow_arrayref) {
-	    printf "%s\n", join("\t", map {defined $_ ? $_ : '\\NULL'} @$r);
+	    if ($sgml) {
+		if (!$count) {
+		    $H->start_event('table');
+		    $H->event(title=>"Query Results");
+		    $H->start_event('tgroup');
+		    $H->event('@'=>[
+				    [cols=>scalar(@$r)]]);
+		    $H->event(thead=>[
+				      [row=>[
+					     map {[entry=>$_]} @$cols]]]);
+		    $H->start_event('tbody');
+		}
+		$H->event(row=>[map {[entry=>$_]} @$r]);
+	    }
+	    else {
+		printf "%s\n", 
+		  join("\t", map {defined $_ ? $_ : '\\NULL'} @$r);
+	    }
+	    $count++;
 	}
-        
-	$dbh->disconnect;	
-	exit 0;
-    }
-    my $H = Data::Stag->getformathandler($writer || $ENV{STAG_WRITER} || 'xml');
-    $H->use_color(1) if $color;
-    my $fh;
-    if ($out) {
-	my $fh = FileHandle->new(">$out") || die "cannot write to $out";
-	$H->fh($fh);
     }
     else {
-	$H->fh(\*STDOUT);
+        my $fh;
+        if ($out) {
+            my $fh = FileHandle->new(">$out") || die "cannot write to $out";
+            $H->fh($fh);
+        }
+        else {
+            $H->fh(\*STDOUT);
+        }
+        my $stag = $dbh->selectall_stag(@sel_args);
+        $stag->events($H);
+        $fh->close if $fh;
     }
-    my $stag = $dbh->selectall_stag(@sel_args);
-    $stag->events($H);
-    $fh->close if $fh;
-#    if ($writer) {
-#	my $stag = $dbh->selectall_stag(@sel_args);
-#	$xml = $stag->$writer();
-#    }
-#    else {
-#	$xml = $dbh->selectall_xml(@sel_args);
-#    }
 };
 if ($@) {
     print "FAILED\n$@";
@@ -216,7 +250,8 @@ if ($@) {
 
 $dbh->disconnect;
 if ($show) {
-    print $dbh->last_stmt->xml;
+    my ($sql, @exec_args) = $dbh->last_sql_and_args;
+    print "DBI SQL:\n$sql\n\nARGUMENT BINDINGS: @exec_args\n";
 }
 #print $xml;
 

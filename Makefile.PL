@@ -1,4 +1,4 @@
-#$Id: Makefile.PL,v 1.7 2004/04/02 04:12:07 cmungall Exp $
+#$Id: Makefile.PL,v 1.11 2004/07/15 19:14:29 cmungall Exp $
 
 
 # This Makefile.PL was cut-n-pasted from the DBIx::Abstract
@@ -40,7 +40,7 @@ my $TESTRECREATE  = $ENV{TESTRECREATE} || "dropdb $hostflag test; createdb $host
 
 my $source = {};
 
-foreach my $key (qw/testdsn testuser testpassword testrecreate/) {
+foreach my $key (qw/testdsn testuser testhost testpassword testrecreate/) {
   Configure($opt, $source, $key);
 }
 
@@ -59,7 +59,7 @@ foreach my $val (values %$source) {
   $slen = length($val) if length($val) > $slen;
 }
 foreach my $key (sort { $a cmp $b} keys %$opt) {
-  printf("  %-" . $keylen . "s (%-" . $slen . "s) = %s\n",
+    printf("  %-" . $keylen . "s (%-" . $slen . "s) = %s\n",
 	 $key, $source->{$key}, $opt->{$key})
 }
 
@@ -101,7 +101,9 @@ WriteMakefile(
                          },
 	      'VERSION_FROM' => "DBIx/DBStag.pm",
 	      'PREREQ_PM'    => {
-				 'Data::Stag'         => 0,
+				 'Parse::RecDescent'  => 0,
+				 'Text::Balanced'     => 0,
+				 'Data::Stag'         => '0.06',
 				 'DBIx::DBSchema'     => 0,
 				 'DBI'                => 0,
 				},
@@ -112,6 +114,7 @@ WriteMakefile(
                                  'scripts/stag-autotemplate.pl',
                                  'scripts/stag-template2bin.pl',
                                  'scripts/stag-storenode.pl',
+                                 'scripts/stag-ir.pl',
                                  'scripts/stag-qsh',
                                  'cgi-bin/ubiq.cgi',
 				],
