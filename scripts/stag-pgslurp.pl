@@ -2,11 +2,11 @@
 
 =head1 NAME 
 
-stag-storenode.pl
+stag-pgslurp.pl
 
 =head1 SYNOPSIS
 
-  stag-storenode.pl -d "dbi:Pg:dbname=mydb;host=localhost" myfile.xml
+  stag-pgslurp.pl -d "dbi:Pg:dbname=mydb;host=localhost" myfile.xml
 
 =head1 DESCRIPTION
 
@@ -102,7 +102,7 @@ uniqueness constraints)
 
 =head2 Step 3: Store the data in the db
 
-  stag-storenode.pl -u movie -d 'dbi:Pg:mydb' data.mog.xml
+  stag-pgslurp.pl -u movie -d 'dbi:Pg:mydb' data.mog.xml
 
 You generally dont need extra metadata here; everything can be
 infered by introspecting the database.
@@ -139,18 +139,29 @@ if ($help) {
 }
 
 #print STDERR "Connecting to $db\n";
-my $dbh = DBIx::DBStag->connect($db);
-$dbh->dbh->{AutoCommit} = 0;
 
-foreach my $fn (@ARGV) {
+my $fn = shift @ARGV;
+
+slurp($fn);
+
+sub slurp {
+    my $fn = shift;
+    my $tree = 
+      Data::Stag->parse($fn, 
+                        $parser);
+    fcmd("$DROPDB $db");
+    cmd("$CREATEDB $db");
+    my $dbh = DBIx::DBStag->connect($db);
+    $dbh->dbh->{AutoCommit} = 0;
+    $dbh->do($db->autoddl($tree, \@link));
+
     if ($unit) {
 	my $H = Data::Stag->makehandler($unit=>sub {
 					    my $self = shift;
 					    my $stag = shift;
-#					    $dbh->begin_work;
+					    $dbh->begin_work;
 					    $dbh->storenode($stag);
 					    $dbh->commit;
-					    return;
 					});
 	Data::Stag->parse(-file=>$fn, -handler=>$H);
     }
@@ -159,9 +170,12 @@ foreach my $fn (@ARGV) {
 	$dbh->storenode($stag);
 	$dbh->commit;
     }
-#    my @kids = $stag->kids;
-#    foreach (@kids) {
-#        $dbh->storenode($_);
-#    }
 }
-$dbh->disconnect;
+
+sub cmd {
+    my $err = system("@_");
+    die "error in: @_" if $err;
+}
+sub fcmd {
+    my $err = system("@_");
+}

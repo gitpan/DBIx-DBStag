@@ -1,4 +1,5 @@
-#$Id: Makefile.PL,v 1.3 2003/04/30 05:50:58 cmungall Exp $
+#$Id: Makefile.PL,v 1.7 2004/04/02 04:12:07 cmungall Exp $
+
 
 # This Makefile.PL was cut-n-pasted from the DBIx::Abstract
 # Nakefile.PL, by Andrew Turner <turnera@cpan.org>
@@ -101,13 +102,18 @@ WriteMakefile(
 	      'VERSION_FROM' => "DBIx/DBStag.pm",
 	      'PREREQ_PM'    => {
 				 'Data::Stag'         => 0,
+				 'DBIx::DBSchema'     => 0,
 				 'DBI'                => 0,
 				},
 	      'EXE_FILES'    => [
                                  'scripts/selectall_xml.pl',
                                  'scripts/selectall_html.pl',
                                  'scripts/stag-autoddl.pl',
+                                 'scripts/stag-autotemplate.pl',
+                                 'scripts/stag-template2bin.pl',
                                  'scripts/stag-storenode.pl',
+                                 'scripts/stag-qsh',
+                                 'cgi-bin/ubiq.cgi',
 				],
 	      
 	      clean => {

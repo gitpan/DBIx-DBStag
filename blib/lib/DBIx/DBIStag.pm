@@ -1,4 +1,4 @@
-# $Id: DBStag.pm,v 1.23 2004/04/02 04:12:07 cmungall Exp $
+# $Id: DBIStag.pm,v 1.1.1.1 2003/04/23 00:59:35 cmungall Exp $
 # -------------------------------------------------------
 #
 # Copyright (C) 2002 Chris Mungall <cjm@fruitfly.org>
@@ -10,7 +10,7 @@
 # POD docs at end of file
 #---
 
-package DBIx::DBStag;
+package DBIx::DBIStag;
 
 
 use strict;
@@ -19,10 +19,9 @@ use Carp;
 use DBI;
 use Data::Stag qw(:all);
 use DBIx::DBSchema;
-use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION = '0.02';
+$VERSION = '0.01';
 
 
 our $DEBUG;
@@ -34,8 +33,8 @@ sub DEBUG {
 
 sub trace {
     my ($priority, @msg) = @_;
-    return unless $ENV{DBSTAG_TRACE};
-    print STDERR "@msg\n";
+    return unless $ENV{DBISTAG_TRACE};
+    print "@msg\n";
 }
 
 sub dmp {
@@ -43,31 +42,17 @@ sub dmp {
     print Dumper shift;
 }
 
-sub force {
-    my $self = shift;
-    $self->{_force} = shift if @_;
-    return $self->{_force};
-}
-
 
 sub new {
     my $proto = shift; 
     my $class = ref($proto) || $proto;
-    my ($dbh) = 
-      rearrange([qw(dbh)], @_);
-
     my $self = {};
     bless $self, $class;
-    if ($dbh) {
-	$self->dbh($dbh);
-    }
     $self;
 }
 
-
 sub connect {
     my $class = shift;
-    my $dbi = shift;
     my $self;
     if (ref($class)) {
         $self = $class;
@@ -76,251 +61,11 @@ sub connect {
         $self = {};
         bless $self, $class;
     }
-    $dbi = $self->resolve_dbi($dbi);
-    eval {
-	$self->dbh(DBI->connect($dbi, @_));
-    };
-    if ($@ || !$self->dbh) {
-	my $mapf = $ENV{DBSTAG_DBIMAP_FILE};
-	print STDERR <<EOM
-
-Could not connect to database "$dbi"
-
-To connect to a database, you need to set the environment variable
-DBSTAG_DBIMAP_FILE to the location of your DBI Stag resources file, OR
-you need to specify the full dbi string of the database
-
-A dbi string looks like this:
-
- dbi:Pg:dbname=foo;host=mypgserver.foo.com
-
-A resources file provides mappings from logical names like "foo" to
-full DBI locators suchas the one above
-
-Please type "man DBI" for more information on DBI strings
-
-If you are specifying a valid DBI locator or valid logical name and
-still connect, check the database server is responding
-
-EOM
-	  ;
-	exit 0;
-    }
+    $self->dbh(DBI->connect(@_));
     # HACK
     $self->dbh->{RaiseError} = 1;
-    $self->dbh->{ShowErrorStatement} = 1;
     $self->setup;
     return $self;
-}
-
-sub resolve_dbi {
-    my $self = shift;
-    my $dbi = shift;
-    if (!$dbi) {
-	$self->throw("database name not provided!");
-    }
-    if ($dbi !~ /[;:]/) {
-	my $rh = $self->resources_hash;
-	my $res = 
-	  $rh->{$dbi};
-	if (!$res) {
-	    $res =
-	      {loc=>"Pg:$dbi"};
-	}
-	if ($res) {
-	    my $loc = $res->{loc};
-	    if ($loc =~ /(\w+):(\S+)\@(\S+)/) {
-		my $dbms = $1;
-		my $dbn = $2;
-		my $host = $3;
-		$dbi = "dbi:$dbms:database=$dbn:host=$host";
-		if ($dbms =~ /pg/i) {
-		    $dbi = "dbi:Pg:dbname=$dbn;host=$host";
-		}
-	    } 
-	    elsif ($loc =~ /(\w+):(\S+)$/) {
-		my $dbms = $1;
-		my $dbn = $2;
-		$dbi = "dbi:$dbms:database=$dbn";
-		if ($dbms =~ /pg/i) {
-		    $dbi = "dbi:Pg:dbname=$dbn";
-		}
-	    } 
-	    else {
-		$self->throw("$dbi -> $loc does not conform to standard.\n".
-			     "<DBMS>:<DB>\@<HOST>");
-	    }
-	}
-	else {
-	    $self->throw("$dbi is not a valid DBI locator.\n");
-	}
-    }
-    return $dbi;
-}
-
-sub resources_hash {
-    my $self = shift;
-    my $mapf = $ENV{DBSTAG_DBIMAP_FILE};
-    my $rh;
-    if ($mapf) {
-	if (-f $mapf) {
-	    $rh = {};
-	    open(F, $mapf) || $self->throw("Cannot open $mapf");
-	    while (<F>) {
-		chomp;
-		next if /^\#/;
-		s/^\!//;
-		my @parts =split(' ', $_);
-		next unless (@parts >= 3);
-		my ($name, $type, $loc, $tagstr) =@parts;
-		my %tagh = ();
-		if ($tagstr) {
-		    my @parts = split(/;\s*/, $tagstr);
-		    foreach (@parts) {
-			my ($t, $v) = split(/\s*=\s*/, $_);
-			$tagh{$t} = $v;
-		    }
-		}
-		$rh->{$name} =
-		  {
-		   %tagh,
-		   name=>$name,
-		   type=>$type,
-		   loc=>$loc,
-		   tagstr=>$tagstr,
-		  };
-	    }
-	    close(F) || $self->throw("Cannot close $mapf");
-	} else {
-	    $self->throw("$mapf does not exist");
-	}
-    }
-    return $rh;
-}
-
-
-sub resources_list {
-    my $self = shift;
-    my $rh =
-      $self->resources_hash;
-    my $rl;
-    if ($rh) {
-	$rl =
-	  [map {$_} values %$rh];
-    }
-    return $rl;
-}
-
-sub find_template {
-    my $self = shift;
-    my $tname = shift;
-    my $path = $ENV{DBSTAG_TEMPLATE_DIRS} || '';
-    my $tl = $self->template_list;
-    my ($template, @rest) = grep {$tname eq $_->name} @$tl;
-
-    if (!$template) {
-	print STDERR "\n\nI could not find the Stag SQL template called \"$tname\".\n";
-	if (!$path) {
-	    print STDERR <<EOM1
-
-In order to do use this or any other template, you need to set the environment
-variable DBSTAG_TEMPLATE_DIRS to the directory or a set of directories
-containing SQL templates. For example
-
-  setenv DBSTAG_TEMPLATE_DIRS=".:\$HOME/my-sql-templates:/usr/share/system-sql-templates"
-
-EOM1
-;
-	}
-	else {
-	    print STDERR <<EOM2
-
-I am looking in the following directories:
-
-  $path
-
-Check the contents of the directory to see if the stag sql template
-you require is there, and is readable by you. Stag SQL templates
-should end with the suffix ".stg"
-
-If you wish to search other directories, set the environment variable
-DBSTAG_TEMPLATE_DIRS, like this:
-
-  setenv DBSTAG_TEMPLATE_DIRS=".:\$HOME/my-sql-templates:$path"
-
-EOM2
-;
-	}
-	$self->throw("Could not find template \"$tname\" in: $path");
-    }
-    return $template;
-}
-
-sub find_templates_by_schema {
-    my $self = shift;
-    my $schema = shift;
-    my $tl = $self->template_list;
-
-    my @templates = grep {$_->stag_props->tmatch('schema', $schema)} @$tl;
-    
-    return \@templates;
-}
-
-sub find_templates_by_dbname {
-    my $self = shift;
-    my $dbname = shift;
-    my $res = $self->resources_hash->{$dbname};
-    my $templates;
-    if ($res) {
-	my $schema = $res->{schema} || '';
-	if ($schema) {
-	    $templates = $self->find_templates_by_schema($schema);
-	}
-	else {
-	    # unknown schema - show all templates
-#	    $templates = $self->template_list;
-	}
-    }
-    else {
-	$self->throw("unknown db: $dbname");
-    }
-    return $templates;
-}
-
-sub template_list {
-    my $self = shift;
-    my %already_got = ();
-    if (!$self->{_template_list}) {
-        my $path = $ENV{DBSTAG_TEMPLATE_DIRS} || '.';
-        my @dirs = split(/:/, $path);
-        my @templates = ();
-
-        foreach my $dir (@dirs) {
-            foreach my $fn (glob("$dir/*.stg")) {
-                if (-f $fn) {
-                    require "DBIx/DBStag/SQLTemplate.pm";
-                    my $template = DBIx::DBStag::SQLTemplate->new;
-                    $template->parse($fn);
-                    push(@templates, $template) unless $already_got{$template->name};
-		    $already_got{$template->name} = 1;
-                }
-            }
-        }
-        $self->{_template_list} = \@templates;
-    }
-    return $self->{_template_list};
-}
-
-sub find_schema {
-    my $self = shift;
-    my $dbname = shift;
-    my $rl = $self->resouces_list || [];
-    my ($r) = grep {$_->{name} eq $_ ||
-		      $_->{loc} eq $_} @$rl;
-    if ($r) {
-	return $r->{schema};
-    }
-    return;
 }
 
 sub setup {
@@ -391,7 +136,7 @@ sub get_pk_col {
     my $self = shift;
     my $table = shift;
     
-    my $tableobj = $self->dbschema->table(lc($table));
+    my $tableobj = $self->dbschema->table($table);
     if (!$tableobj) {
         confess("Can't get table $table from db.\n".
                 "Maybe DBIx::DBSchema does not work with your database?");
@@ -403,7 +148,7 @@ sub get_all_cols {
     my $self = shift;
     my $table = shift;
     
-    my $tableobj = $self->dbschema->table(lc($table));
+    my $tableobj = $self->dbschema->table($table);
     if (!$tableobj) {
         confess("Can't get table $table from db.\n".
                 "Maybe DBIx::DBSchema does not work with your database?");
@@ -415,7 +160,7 @@ sub get_unique_sets {
     my $self = shift;
     my $table = shift;
 
-    my $tableobj = $self->dbschema->table(lc($table));
+    my $tableobj = $self->dbschema->table($table);
     if (!$tableobj) {
         confess("Can't get table $table from db.\n".
                 "Maybe DBIx::DBSchema does not work with your database?");
@@ -501,129 +246,11 @@ sub elt_card {
     return ($e, $c);
 }
 
-sub source_transforms {
-    my $self = shift;
-    $self->{_source_transforms} = shift if @_;
-    return $self->{_source_transforms};
-}
-
-sub autotemplate {
-    my $self = shift;
-    my $schema = shift;
-    return () unless grep {!stag_isterminal($_)} $schema->subnodes;
-    my @J = ();
-    my @W = ();
-    my @EXAMPLE = ();
-    my ($tname) = elt_card($schema->element);
-    my %joinpaths = ();
-    
-    $schema->iterate(sub {
-			 my $n = shift;
-			 my $parent = shift;
-			 my ($tbl, $card) = elt_card($n->element);
-			 if (!$parent) {
-			     push(@J, $tbl);
-#			     $joinpaths{$tbl} = $tbl;
-			     return;
-			 }
-			 my ($ptbl) = elt_card($parent->element);
-			 if (stag_isterminal($n)) {
-			     my $v = $ptbl.'_'.$tbl;
-			     my $w = "$ptbl.$tbl => \&$v\&";
-			     if ($ptbl eq $tname) {
-				 push(@W,
-				      "[ $w ]");
-			     }
-			     else {
-				 my $pk = $tname.'_id';
-				 my $subselect = 
-				   "SELECT $pk FROM $joinpaths{$ptbl}".
-				     " WHERE $w";
-				 push(@W,
-				      "[ $pk IN ($subselect) ]");
-			     }
-			     # produce example formula for non-ints
-			     if ($n->data eq 's') {
-				 push(@EXAMPLE,
-				      "$v => SELECT DISTINCT $tbl FROM $ptbl");
-			     }
-			 }
-			 else  {
-			     my $jtype = 'INNER JOIN';
-			     if ($card eq '*' || $card eq '?') {
-				 $jtype = 'LEFT OUTER JOIN';
-			     }
-			     my $jcol = $ptbl.'_id';
-			     push(@J,
-				  "$jtype $tbl USING ($jcol)");
-			     if ($joinpaths{$ptbl}) {
-				 $joinpaths{$tbl} =
-				   "$joinpaths{$ptbl} INNER JOIN $tbl USING ($jcol)";
-			     }
-			     else {
-				 $joinpaths{$tbl} = $tbl;
-			     }
-			 }
-			 return;
-		     });
-    my $from = join("\n  ", @J);
-    my $where = join("\n  ", @W);
-    my $nesting = $schema->duplicate;
-    $nesting->iterate(sub {
-			  my $n = shift;
-			  if (stag_isterminal($n)) {
-			      return;
-			  }
-			  my ($tbl, $card) = elt_card($n->element);
-			  $n->element($tbl);
-			  my @sn = $n->kids;
-			  @sn =
-			    grep {
-				my ($tbl, $card) = elt_card($_->element);
-				$_->element($tbl);
-				!stag_isterminal($_)
-			    } @sn;
-			  if (@sn) {
-			      $n->kids(@sn);
-			  }
-			  else {
-			      $n->data([]);
-			  }
-		      });
-    $nesting = Data::Stag->new(set=>[$nesting]);
-    my $nstr = $nesting->sxpr;
-    $nstr =~ s/^\'//;
-    my $tt =
-      join("\n",
-	   ":SELECT *",
-	   ":FROM $from",
-	   ":WHERE $where",
-	   ":USE NESTING",
-	   "$nstr",
-	   "",
-	   "// ---- METADATA ----",
-	   "schema:",
-	   "desc: Fetches $tname objects",
-	   "      This is an AUTOGENERATED template",
-	   "",
-	   (map {
-	       "example_input: $_"
-	   } @EXAMPLE),
-	  );
-
-#    my $template = DBIx::DBStag::SQLTemplate->new;
-    my @sn = $schema->subnodes;
-    my @tts = ();
-    push(@tts, $self->autotemplate($_)) foreach @sn;
-    return ([$tname=>$tt], @tts);
-}
-
 sub autoddl {
     my $self = shift;
     my $stag = shift;
     my $link = shift;
     my $schema = $stag->autoschema;
-    $self->source_transforms([]);;
     $self->_autoddl($schema, undef, $link);
 }
 
@@ -645,13 +272,8 @@ sub _autoddl {
             $pk = ' PRIMARY KEY';
         }
         if ($card =~ /[\+\*]/) {
-	    my $new_name =  sprintf("%s_%s", $tbl, $col);
-	    my $tf = ["$tbl/$col", "$new_name/$col"];
-	    push(@{$self->source_transforms}, $tf);
-	    $_->name($new_name);
-	    $_->data([[$col => $_->data]]);
-#	    $self->throw("In the source data, '$col' is a multivalued\n".
-#			 "terminal (data) node. This is difficult to transform");
+	    $self->throw("In the source data, '$col' is a multivalued\n".
+			 "terminal (data) node. This is difficult to transform");
         }
         else {
 #            my $isnull = $card eq '?' ? '' : ' NOT NULL';
@@ -664,7 +286,7 @@ sub _autoddl {
     if ($parent) {
         my ($pn) = elt_card($parent->element);
         push(@cols,
-             sprintf("%s_id INT", $pn));
+             sprintf("%s_id int", $pn));
         push(@cols,
              sprintf("FOREIGN KEY (%s_id) REFERENCES $pn(%s_id)$casc", $pn, $pn));
     }
@@ -816,48 +438,7 @@ sub policy_freshbulkload {
     $self->{_policy_freshbulkload} = shift if @_;
     return $self->{_policy_freshbulkload};
 }
-sub mapgroups {
-    my $self = shift;
-    if (@_) {
-        $self->{_mapgroups} = [@_];
-        $self->{_colvalmap} = {}
-          unless $self->{_colvalmap};
-        foreach my $cols (@_) {
-            my $h = {};
-            foreach (@$cols) {
-                $self->{_colvalmap}->{$_} = $h;
-            }
-        }
-    }
-    return @{$self->{_mapgroups} || []};
-}
-sub get_mapping_for_col {
-    my $self = shift;
-    my $col = shift;
-    return $self->{_colvalmap}->{$col};
-}
 
-sub make_stag_node_dbsafe {
-    my $self = shift;
-    my $node = shift;
-    my $name = $node->name;
-    my $safename = $self->dbsafe($name);
-    if ($name ne $safename) {
-	$node->name($safename);
-    }
-    my @kids = $node->kids;
-    foreach (@kids) {
-	$self->make_stag_node_dbsafe($_) if ref $_;
-    }
-    return;
-}
-sub dbsafe {
-    my $self = shift;
-    my $name = shift;
-    $name = lc($name);
-    $name =~ tr/a-z0-9_//cd;
-    return $name;
-}
 
 #'(t1
 #  (foo x)
@@ -906,7 +487,6 @@ sub storenode {
     my $node = shift;
     my @args = @_;
     my $dupnode = $node->duplicate;
-    $self->make_stag_node_dbsafe($dupnode);
     $self->add_linking_tables($dupnode);
     $self->_storenode($dupnode,@args);
 }
@@ -923,11 +503,6 @@ sub _storenode {
     my $is_caching_on = $self->is_caching_on($element);
 
     my $mapping = $self->mapping || [];
-
-    # each relation has zero or one primary keys;
-    # primary keys are assumed to be single-column
-    my $pkcol = $self->get_pk_col($element);
-    trace(0, "PKCOL: $pkcol");
 
     # -- PRE-STORE CHILD NON-TERMINALS --
     # before storing this node, we need to
@@ -990,9 +565,6 @@ sub _storenode {
             my $col = $map->get_col || $self->get_pk_col($fktable);
 
             # aliases map an extra table
-            # eg table X col X.A => Y.B
-            # fktable_alias = A
-            #
             my $fktable_alias = $map->get_fktable_alias;
             my $orig_nt = $nt;
             if ($fktable_alias) {
@@ -1018,31 +590,6 @@ sub _storenode {
         }
 #        $node->unset($nt->element); # clear it
     }
-    # --- done storing kids
-
-    # --- replace *IDs ---
-    my @tnodes = $node->tnodes;
-    my %remap = ();
-    foreach my $tnode (@tnodes) {
-        my $colvalmap = $self->get_mapping_for_col($tnode->name);
-        if ($colvalmap) {
-            my $v = $tnode->data;
-            my $nv = $colvalmap->{$v};
-            if ($nv) {
-                trace(0, "remapping $v => $nv");
-                $tnode->data($nv);
-            }
-            else {
-#                if ($tnode->name eq $pkcol && $v =~ /^\*/) {
-                if ($tnode->name eq $pkcol) {
-                    trace(0, "will remap $pkcol: $v");
-                    $remap{$tnode->name} = $v;
-                    $node->unset($tnode->name);
-                }
-            }
-        }
-    }
-
     
     # --- Get columns that need updating/inserting ---
     # turn all remaining tag-val pairs into a hash
@@ -1060,6 +607,11 @@ sub _storenode {
                 join(', ', map {"\"@refcols\""} @refcols).
                 "\n\nPerhaps you need to specify more schema metadata?");
     }
+
+    # each relation has zero or one primary keys;
+    # primary keys are assumed to be single-column
+    my $pkcol = $self->get_pk_col($element);
+    trace(0, "PKCOL: $pkcol");
 
     # each relation has zero or more unique keys;
     # unique keys may be compound (ie >1 column)
@@ -1121,8 +673,7 @@ sub _storenode {
         @usets = ( [grep {$_ ne $pkcol} @cols] );
     }
     if ($pkcol) {
-        # make single PK the first unique key set
-        unshift(@usets, [$pkcol]);
+        push(@usets, [$pkcol]);
     }
 
     # -------- find update constraint by unique keys ----
@@ -1161,7 +712,6 @@ sub _storenode {
         # this one is unsuitable
         next if grep { !defined($_) } values %constr;
 
-        # what if no pk???
         my $select_col = $pkcol || $uset->[0]; # use pk if possible
 
         # TEST
@@ -1169,14 +719,6 @@ sub _storenode {
         # this tuple this session; and if so, what
         # the update constraint used was
         if ($is_caching_on) {
-
-            # --
-            # EXPERIMENTAL
-            #
-            # caching off for now
-            #
-            # --
-
             my %cached_colvals =
               $self->query_cache($element,
                                  \%constr,
@@ -1230,11 +772,6 @@ sub _storenode {
                 # this is the value we return at the
                 # end
                 $id = $vals->[0];
-                if ($remap{$pkcol}) {
-                    my $colvalmap = $self->get_mapping_for_col($pkcol);
-                    $colvalmap->{$remap{$pkcol}} = $id;
-                    trace(0, "colvalmap $remap{$pkcol} = $id");
-                }
             }
             # we have a suitable update constraint;
             # ignore any other unique keys
@@ -1279,14 +816,6 @@ sub _storenode {
           $self->insertrow($element,
                            \%store_hash,
                            $pkcol);
-        if ($pkcol) {
-            if ($remap{$pkcol}) {
-                my $colvalmap = $self->get_mapping_for_col($pkcol);
-                $colvalmap->{$remap{$pkcol}} = $id;
-                trace(0, "colvalmap $remap{$pkcol} = $id");
-            }
-        }
-
         # -- CACHE RESULTS --
         if ($is_caching_on) {
             my %cache_hash = %store_hash;
@@ -1314,12 +843,11 @@ sub _storenode {
     if (@delayed_store) {
         foreach my $sn (@delayed_store) {
             my $fk = $pkcol;
+            trace(0, "NOW TIME TO STORE [curr pk val = $id] [fkcol = $fk] ", $sn->xml);
 
             # ASSUMPTION - FK and PK are named the same
             # WRONG????????????????
             $sn->set($fk, $id);
-
-            trace(0, "NOW TIME TO STORE [curr pk val = $id] [fkcol = $fk] ", $sn->xml);
             $self->_storenode($sn);
 
 #            my ($map) =
@@ -1364,14 +892,14 @@ sub _storenode {
 #    }
 #}
 
-sub rmake_nesting {
+sub rmake_path {
     my $node = shift;
 
     if ($node->element eq 'composite') {
 	my $first = $node->getnode_first;
 	my $second = $node->getnode_second;
-	my $head = rmake_nesting($first->data->[0]);
-	my $tail = rmake_nesting($second->data->[0]);
+	my $head = rmake_path($first->data->[0]);
+	my $tail = rmake_path($second->data->[0]);
 	if ($head->isterminal) {
 	    return 
 	      Data::Stag->new($head->element => [$tail]);
@@ -1414,8 +942,8 @@ sub selectall_xml {
 # (candidate for optimisation - TODO - use event firing model)
 sub selectall_sax {
     my $self = shift;
-    my ($sql, $nesting, $h) = 
-      rearrange([qw(sql nesting handler)], @_);
+    my ($sql, $path, $h) = 
+      rearrange([qw(sql path handler)], @_);
     my $stag = $self->selectall_stag(@_);
     $h = $h || $self->sax_handler;
     if (!$h) {
@@ -1433,30 +961,12 @@ sub selectall_sxpr {
     return $stag->sxpr;
 }
 
-# does not bother decomposing and nesting the results; just
-# returns the denormalised table from the SQL query.
-# arrayref of arrayrefs - rows x cols
-# first row of rows is column headings
-sub selectall_rows {
-    my $self = shift;
-    my ($sql, $nesting, $bind, $template) = 
-      rearrange([qw(sql nesting bind template)], @_);
-    my $rows =
-      $self->selectall_stag(-sql=>$sql,
-			    -nesting=>$nesting,
-			    -bind=>$bind,
-			    -template=>$template,
-			    -return_arrayref=>1,
-			   );
-    return $rows;
-}
-
 # ---------------------------------------
-# selectall_stag(sql, nesting)
+# selectall_stag(sql, path)
 #
 # Takes an sql string containing a SELECT statement,
 # parses it to get the tree structure; this can be
-# overridden with the nesting optional argument.
+# overridden with the path optional argument.
 #
 # The SELECT statement is executed, and the relations are
 # transformed into a stag tree
@@ -1464,95 +974,14 @@ sub selectall_rows {
 # ---------------------------------------
 sub selectall_stag {
     my $self = shift;
-    my ($sql, $nesting, $bind, $template, $return_arrayref) = 
-      rearrange([qw(sql nesting bind template return_arrayref)], @_);
-    my $prep_h = $self->prepare_stag(@_);
-    my $cols = $prep_h->{cols};
-    my $sth = $prep_h->{sth};
-    my $exec_args = $prep_h->{exec_args};
-    # TODO - make this event based so we don't have to
-    # load all into memory
-    my $rows =
-      $self->dbh->selectall_arrayref($sth, undef, @$exec_args);
-    if ($return_arrayref) {
-	my @hdrs = ();
-	for (my $i=0; $i<@$cols; $i++) {
-	    my $h = $prep_h->{col_aliases_ordered}->[$i] || $cols->[$i];
-	    push(@hdrs, $h);
-	}
-	return [\@hdrs, @$rows];
-    }
-
-    trace(0, sprintf("Got %d rows\n", scalar(@$rows)));
-    # --- reconstruct tree from relations
-    my $stag =
-      $self->reconstruct(
-                         -rows=>$rows,
-                         -cols=>$cols,
-                         -alias=>$prep_h->{alias},
-                         -nesting=>$prep_h->{nesting}
-                        );
-    return $stag;
-}
-
-sub prepare_stag {
-    my $self = shift;
-    my ($sql, $nesting, $bind, $template, $return_arrayref) = 
-      rearrange([qw(sql nesting bind template return_arrayref)], @_);
-
+    my ($sql, $path) = 
+      rearrange([qw(sql path)], @_);
     my $parser = $self->parser;
-
-    my $sth;
-    my @exec_args = ();
-    if (ref($sql)) {
-	$template = $sql;
-    }
-    if ($template) {
-	if (!ref($template)) {
-	    $template = $self->find_template($template);
-	}
-	($sql, @exec_args) = $template->get_sql_and_args($bind);
-    }
-    trace 0, "parsing_sql: $sql\n";
-
-    # PRE-parse SQL statement for stag-specific extensions
-    if ($sql =~ /(.*)\s+use\s+nesting\s*(.*)/si) {
-	my ($pre, $post) = ($1, $2);
-	my ($extracted, $remainder) =
-	  extract_bracketed($post, '()');
-        if ($nesting) {
-            $self->throw("nestings clash: $nesting vs $extracted");
-        }
-	$nesting = Data::Stag->parsestr($extracted);
-	$sql = "$pre $remainder";
-    }
-
+    trace 0, "parsing: $sql\n";
 
     # get the parsed SQL SELECT statement as a stag node
     my $stmt = $parser->selectstmt($sql);
-    if (!$stmt) {
-	# there was some error parsing the SQL;
-	# DBI can probably give a better explanation.
-	eval {
-	    my $sth = $self->dbh->prepare($sql);
-	    
-	};
-	if ($@) {
-	    $self->throw("SQL ERROR:\n$@");
-	}
-	# DBI accepted it - must be a bug in the DBStag grammar
-	$self->throw("I'm sorry but the SQL statement you gave does\n".
-		     "not conform to the more limited subset of SQL\n".
-		     "that DBStag supports. Please see the DBStag docs\n".
-		     "for details.\n".
-		     "\n".
-		     "Remember to check you explicitly declare all aliases\n".
-		     "using AS\n\n\nSQL:$sql");
-    }
-
-
-    trace 0, "parsed_sql: $sql\n";
-#    trace 0, $stmt->xml;
+    trace 0, "parsed\n";
     my $dbschema = $self->dbschema;
 
     $self->last_stmt($stmt);
@@ -1586,7 +1015,7 @@ sub prepare_stag {
     }
     my $aliasstruct = Data::Stag->new(alias=>[@aliases]);
 
-    # --- nestings ---
+    # --- paths ---
     #
     # the cartesian product that results from a SELECT can
     # be turned into a tree - there is more than one tree to
@@ -1596,25 +1025,22 @@ sub prepare_stag {
     # [z [x y]]
     # etc
     #
-    # the actual allowed nestings through the graph is constrained
+    # the actual allowed paths through the graph is constrained
     # by the FK relationships; we do not utilise this yet (TODO!)
     # later the user need only specify the root. for now they
-    # must specify the full nesting OR allow the bracket structure
+    # must specify the full path OR allow the bracket structure
     # of the joins...
 
-    # if the user did not explicitly supply a nesting,
+    # if the user did not explicitly supply a path,
     # guess one from the bracket structure of the FROM 
-    # clause (see rmake_nesting)
-    # [TODO: be more clever in guessing the nesting using FKs]
-    if (!$nesting) {
-	$nesting = Data::Stag->new(top=>1);
-#	my $cons = rmake_cons($fromstruct->data->[0], $nesting);
-	$nesting = rmake_nesting($fromstruct->data->[0]);
-        $nesting = Data::Stag->new(top=>[$nesting]);
-	trace(0, "\n\nNesting:\n%s\n\n",  $nesting->xml);
-    }
-    if ($nesting && !ref($nesting)) {
-        $nesting = Data::Stag->parsestr($nesting);
+    # clause (see rmake_path)
+    # [TODO: be more clever in guessing the path using FKs]
+    if (!$path) {
+	$path = Data::Stag->new(top=>1);
+#	my $cons = rmake_cons($fromstruct->data->[0], $path);
+	$path = rmake_path($fromstruct->data->[0]);
+        $path = Data::Stag->new(top=>[$path]);
+	trace(0, "\n\nPath:\n%s\n\n",  $path->xml);
     }
 
     # keep an array of named relations used in the query -
@@ -1637,7 +1063,6 @@ sub prepare_stag {
     # making them all of a standard form; eg dealing
     # with functions and '*' wildcards appropriately
 
-    my @col_aliases_ordered = ();
     my @cols =
       map {
 	  # $_ iterator variable is over the columns
@@ -1650,7 +1075,6 @@ sub prepare_stag {
 	  # column alias, if exists
 	  # eg in 'SELECT name AS n' the alias is 'n'
           my $col_alias = $_->get_alias;
-	  push(@col_aliases_ordered, $col_alias);
 
 	  # make the name the alias; prepend named relation if supplied.
 	  # eg in 'SELECT person.name AS n' the name will become
@@ -1684,24 +1108,15 @@ sub prepare_stag {
 	      # return value is aliased, use that alias;
 	      # otherwise ...
 
-	      my $funcname = $func->get_name;
 	      # query the function stag node for the element
 	      # 'col'
 	      my ($col) = 
 		$func->where('col',
 			     sub {shift->get_table});
-	      my $table = $col_alias || $funcname;
 	      if (!$col_alias) {
-		  $col_alias = $funcname;
+		  $col_alias = "FUNC";
 	      }
-	      if ($col) {
-		  $table = $col->get_table;
-	      }
-#	      if ($col_alias =~ /(\w+)__(\w+)/) {
-#		  $table = $1;
-#		  $col_alias = $2;
-#	      }
-	      $name = $table . '.' . $col_alias;
+	      $name = $col->get_table . '.' . $col_alias;
 	      # return:
 	      $name;
 	  }
@@ -1720,15 +1135,12 @@ sub prepare_stag {
               if ($alias_h->{$tn}) {
                   $tn = $alias_h->{$tn}->[0];
               }
-              my $tbl = $dbschema->table(lc($tn));
+              my $tbl = $dbschema->table($tn);
               if (!$tbl) {
                   confess("No such table as $tn");
               }
 	      # introspect schema to get columns for this table
               my @cns = $tbl->columns;
-
-#	      trace(0, Dumper $tbl);
-	      trace(0, "TN:$tn ALIAS:$tn_alias COLS:@cns");
 
 	      # return:
               map { "$tn_alias.$_" } @cns;
@@ -1747,7 +1159,7 @@ sub prepare_stag {
                     my $baserelname = 
                       $alias_h->{$tn} ? 
                         $alias_h->{$tn}->[0] : $tn;
-                    my $tbl = $dbschema->table(lc($baserelname));
+                    my $tbl = $dbschema->table($baserelname);
                     if (!$tbl) {
                         confess("Don't know anything about table:$tn\n".
                                 "Maybe DBIx::DBSchema does not work for your DBMS?");
@@ -1787,50 +1199,24 @@ sub prepare_stag {
           }
       } $stmt->sgetnode_cols->getnode_col;
 
-    @cols =
-      map {
-	  if (/(\w+)__(\w+)/) {
-	      "$1.$2";
-	  }
-	  else {
-	      $_
-	  }
-      } @cols;
-
     # ---- end of column fetching ---
 
     trace(0, "COLS:@cols");
-
-
+    trace(0, "SQL:$sql");
 
     # --- execute SQL SELECT statement ---
-    if ($template) {
-	$sth = $template->cached_sth->{$sql};
-	if (!$sth) {
-	    $sth = $self->dbh->prepare($sql);
-	    $template->cached_sth->{$sql} = $sth;	  
-	}
-#	($sql, $sth, @exec_args) = 
-#	  $template->prepare($self->dbh, $bind);
-    }
-    else {
-        $sth = $self->dbh->prepare($sql);
-    }
-    my $sql_or_sth = $sql;
-    if ($sth) {
-	$sql_or_sth = $sth;
-    }
-    trace(0, "SQL:$sql");
-    trace(0, "Exec_args: @exec_args") if @exec_args;
-    return 
-      {
-       sth=>$sth,
-       exec_args=>\@exec_args,
-       cols=>\@cols,
-       col_aliases_ordered=>\@col_aliases_ordered,
-       alias=>$aliasstruct,
-       nesting=>$nesting
-      };
+    my $rows =
+      $self->dbh->selectall_arrayref($sql);
+    trace(0, sprintf("Got %d rows\n", scalar(@$rows)));
+
+    # --- reconstruct tree from relations
+    my $stag =
+      $self->reconstruct(-top=>"dataset",
+                         -rows=>$rows,
+                         -cols=>\@cols,
+                         -alias=>$aliasstruct,
+                         -path=>$path);
+    return $stag;
 }
 
 
@@ -1876,7 +1262,7 @@ sub get_table_alias_map {
 }
 
 # ============================
-# reconstruct(schema, rows, top, cols, constraints, nesting, aliasstruct)
+# reconstruct(schema, rows, top, cols, constraints, path, aliasstruct)
 #
 # mainly called by: selectall_stag(...)
 #
@@ -1884,7 +1270,7 @@ sub get_table_alias_map {
 # involving JOINs, which is a denormalised relation) and
 # decomposes this relation into a tree structure
 #
-# in order to do this, it requires schema information, and a nesting
+# in order to do this, it requires schema information, and a path
 # through the implicit result graph to build a tree
 # ============================
 sub reconstruct {
@@ -1894,8 +1280,8 @@ sub reconstruct {
         $rows,           # REQUIRED - relation R - array-of-array
         $top,            # OPTIONAL - root node name
         $cols,           # REQUIRED - array of stag nodes per column of R
-        $constraints,    # NOT USED!!!
-        $nesting,           # REQUIRED - tree representing decomposed schema
+        $constraints,    #
+        $path,           # REQUIRED - tree representing decomposed schema
         $aliasstruct,    # OPTIONAL - renaming of columns in R
         $noaliases) =
           rearrange([qw(schema
@@ -1903,7 +1289,7 @@ sub reconstruct {
                         top
                         cols
                         constraints
-                        nesting
+                        path
                         alias
                         noaliases)], @_);
 
@@ -1923,8 +1309,8 @@ sub reconstruct {
     #    (relation "RELATION-NAME")
     #    (name     "COLUMN-NAME")
     #    ))
-    #  (nesting?
-    #   (* "NESTING-TREE")))
+    #  (path?
+    #   (* "PATH-TREE")))
     #
     # each column represents the 
     
@@ -1943,16 +1329,7 @@ sub reconstruct {
     if ($top) {
         stag_set($schema, 'top', $top);
     }
-#    $top = $schema->get_top || "set";
-    if (!$top) {
-	if ($nesting) {
-	    # use first element in nesting
-	    $top = $nesting->element;
-	}
-	else {
-	    $top = 'set';
-	}
-    }
+    $top = $schema->get_top || "set";
     my $topstruct = $tree->new($top, []);
 
     # COLS - this is the columns (attribute names)
@@ -1979,7 +1356,7 @@ sub reconstruct {
                                        [name=>$2]]);
                   }
                   else {
-                      confess "I am confused by this column: $_";
+                      confess $_;
                   }
               }
           } @$cols;
@@ -1987,22 +1364,22 @@ sub reconstruct {
     }
 
 
-    # NESTING - this is the tree structure in
+    # PATH - this is the tree structure in
     # which the relations are structured
     # [override if specified explicitly]
-    if ($nesting) {
-        if (ref($nesting)) {
+    if ($path) {
+        if (ref($path)) {
         }
         else {
-            $nesting = $tree->from('sxprstr', $nesting);
+            $path = $tree->from('sxprstr', $path);
         }
-        $schema->set_nesting([$nesting]);
+        $schema->set_path([$path]);
     }
     else {
-        $nesting = $schema->sgetnode_nesting;
+        $path = $schema->sgetnode_path;
     }
-    if (!$nesting) {
-        confess("no nesting!");
+    if (!$path) {
+        confess("no path!");
     }
 
     # --- alias structure ---
@@ -2103,7 +1480,7 @@ sub reconstruct {
     #  a.1   a.2   a.3   b.1   b.2
     #
     # algorithm:
-    #  use nesting/tree to walk through
+    #  use path/tree to walk through
     #
     # ------------------
 
@@ -2124,9 +1501,9 @@ sub reconstruct {
     #~~~        $all_relation_ah{$relationname} = [];
     #~~~    }
 
-    # start at top of nesting tree
+    # start at top of path tree
     #
-    # a typical nesting tree may look like this:
+    # a typical path tree may look like this:
     #
     # '(tableA
     #   (tableB "1")
@@ -2135,11 +1512,11 @@ sub reconstruct {
     #
     # terminals ie "1" are ignored
 
-    my ($first_in_nesting) = $nesting->subnodes;
-    if (!$first_in_nesting) {
-        $first_in_nesting = $nesting;
+    my ($first_in_path) = $path->subnodes;
+    if (!$first_in_path) {
+        $first_in_path = $path;
     }
-    my $fipname = $first_in_nesting ? $first_in_nesting->name : '';
+    my $fipname = $first_in_path ? $first_in_path->name : '';
 
     # recursive hash representing tree
     #
@@ -2153,7 +1530,7 @@ sub reconstruct {
     #   }
     #
     # this is recursively constructed using the make_a_tree() method
-    # below. the nesting tree (see above) is traversed depth first,
+    # below. the path tree (see above) is traversed depth first,
     # constructing both the child_h hash and the resulting Stag
     # structure.
 
@@ -2190,11 +1567,11 @@ sub reconstruct {
         #  outer keyed by relation id
         #  inner keyed by relation attribute name
         
-        # traverse depth first down nesting;
+        # traverse depth first down path;
         # add new nodes as children of the parent
         $self->make_a_tree($tree,
                     $top_record_h,
-		    $first_in_nesting,
+		    $first_in_path,
 		    \%current_relation_h,
                     \%pkey_by_relationname,
 		    \%cols_by_relationname,
@@ -2229,12 +1606,12 @@ sub make_a_tree {
 
     if (!$pkcols || !@$pkcols) {
 	# if we have no columns for a particular part of
-	# the nesting through the relation, it means it
+	# the path through the relation, it means it
 	# was ommitted from the select clause - just skip
-	# this part of the nesting.
+	# this part of the path.
 	#
 	# for example: SELECT a.*, b.* FROM a NJ a_to_b NJ b
-	# the default nesting will be: [a [a_to_b [b]]]
+	# the default path will be: [a [a_to_b [b]]]
 	# the relation R will have columns:
 	# a.c1    a.c2    b.c1   b.c2
 	#
@@ -2244,7 +1621,7 @@ sub make_a_tree {
 	#  (b
 	#   (c1 "a") (c2 "b")))
 	#
-	# so we just miss out a_to_b in the nesting, because it
+	# so we just miss out a_to_b in the path, because it
 	# has no columns in the relation R.
 	$rec = $parent_rec_h;
     }
@@ -2275,7 +1652,7 @@ sub make_a_tree {
 	    # level of nesting
 	    my $baserelation = $alias2baserelation{$relationname};
 	    if ($baserelation) {
-#		trace(0, "R=$relationname BASE=$baserelation\n");
+		trace(0, "R=$relationname BASE=$baserelation\n");
 		my $baserelationstruct =
 		  Data::Stag->new($baserelation =>
 				  $relationstruct->data);
@@ -2307,9 +1684,6 @@ sub make_a_tree {
 			   \%alias2baserelation);
     }
 }
-
-
-# -------- GENERAL SUBS -----------
 
 sub esctab {
     my $w=shift;
@@ -2432,6 +1806,7 @@ sub insertrow {
     my ($table, $colvalh, $pkcol) = @_;
       
     my @cols = keys %$colvalh;
+    confess("No columns specified") unless @cols;
     my $sql =
       sprintf("INSERT INTO %s (%s) VALUES (%s)",
               $table,
@@ -2441,23 +1816,8 @@ sub insertrow {
                        defined($_) ? $self->quote($colvalh->{$_}) : 'NULL'
                    } @cols),
              );
-    if (!@cols) {
-	$sql = "INSERT INTO $table DEFAULT VALUES";
-    }
-
     trace(0, "SQL:$sql");
-    eval {
-	my $rval = $self->dbh->do($sql);
-    };
-    if ($@) {
-	if ($self->force) {
-	    # what about transactions??
-	    $self->warn("WARNING: $@");
-	}
-	else {
-	    confess $@;
-	}
-    }
+    my $rval = $self->dbh->do($sql);
     my $pkval;
     if ($pkcol) {
         $pkval = $colvalh->{$pkcol};
@@ -2584,40 +1944,15 @@ sub selectgrammar {
                $col;
            }
            | <error>
-	 selectexpr: bselectexpr
-            { $item[1] }
-            | <error>
+         selectexpr: bselectexpr
+           { $item[1] }
+           | <error>
          bselectexpr: funccall
            { $item[1] }
            | <error>
-         bselectexpr: selectcol
+         bselectexpr: bselectcol
            { $item[1] }
            | <error>
-
-	 selectcol: brackselectcol operator selectcol
-	   {
-	       N(col=>[
-		       [func => [
-				 [name => $item[2]->[1]],
-				 [args => [$item[1],$item[3]]]
-				]
-		       ]
-		      ]);
-	   }
-###	   { $item[1]}
-	   | <error>
-	 selectcol: brackselectcol
-	   { $item[1]}
-	   | <error>
-
-	 brackselectcol: '(' selectcol ')' 
-	   { $item[2]}
-	   | <error>
-
-	 brackselectcol: bselectcol
-	   { $item[1]}
-	   | <error>
-
          bselectcol: /(\w+)\.(\w+)/
            { N(col=>[
                      [name => $item[1]],
@@ -2661,9 +1996,6 @@ sub selectgrammar {
             $col;
            }
            | <error>
-
-	 operator: '+' | '-' | '*' | '/' | '||'
-	   
 
          fromtables: jtable
            { [$item[1]] }
@@ -2720,10 +2052,10 @@ sub selectgrammar {
                        ])
          }
            | <error>
-         joinqual: /using\s+/i '(' cols ')'
+         joinqual: /using\s+/i cols
            { N(qual =>[
                        [type=>'using'],
-                       [expr=>"@{$item[3]}"]
+                       [expr=>"@{$item[2]}"]
                       ])
          }
            | <error>
@@ -2762,7 +2094,6 @@ sub selectgrammar {
          exprs: expr ',' exprs
          exprs: expr
 
-	   # bool_expr - eg in where clause
          bool_expr: not_bool_expr boolop bool_expr | not_bool_expr
          not_bool_expr: '!' brack_bool_expr | brack_bool_expr
          brack_bool_expr: '(' bool_expr ')' | bool_exprprim
@@ -2812,13 +2143,12 @@ sub AUTOLOAD {
 	return;
     }
     
-    unless ($self->isa("DBIx::DBStag")) {
+    unless ($self->isa("DBIx::DBIStag")) {
         confess("no such subroutine $name");
     }
-    if ($self->dbh) {
-	if ($self->dbh->can($name)) {
-	    return $self->dbh->$name(@args);
-	}
+    confess("no connection") unless $self->dbh;
+    if ($self->dbh->can($name)) {
+        return $self->dbh->$name(@args);
     }
     confess("no such method:$name)");
 }
@@ -2881,12 +2211,12 @@ __END__
 
 =head1 NAME
 
-  DBIx::DBStag - Relational Database to Hierarchical (Stag/XML) Mapping
+  DBIx::DBIStag - Mapping between databases and Stag tree structures
 
 =head1 SYNOPSIS
 
-  use DBIx::DBStag;
-  my $dbh = DBIx::DBStag->connect("dbi:Pg:dbname=moviedb");
+  use DBIx::DBIStag;
+  my $dbh = DBIx::DBIStag->connect("dbi:Pg:dbname=moviedb");
   my $sql = q[
 	      SELECT 
                studio.*,
@@ -2898,23 +2228,11 @@ __END__
                movie_to_star NATURAL JOIN
                star
 	      WHERE
-               movie.genre = 'sci-fi' AND star.lastname = 'Fisher'
-              USE NESTING
-               (set(studio(movie(star))))
+               movie.genre = 'sci-fi' AND star.lastname = 'Fisher';
 	     ];
   my $dataset = $dbh->selectall_stag($sql);
   my @studios = $dataset->get_studio;
 
-  # returns nested data that looks like this -
-  #
-  # (studio
-  #  (name "20th C Fox")
-  #  (movie
-  #   (name "star wars") (genre "sci-fi")
-  #   (star
-  #    (firstname "Carrie")(lastname "Fisher")))))
-
-  # iterate through result tree -
   foreach my $studio (@studios) {
 	printf "STUDIO: %s\n", $studio->get_name;
 	my @movies = $studio->get_movie;
@@ -2926,7 +2244,7 @@ __END__
 
 	    foreach my $star (@stars) {
 		printf "    STARRING: %s:%s\n", 
-		  $star->get_firstname, $star->get_lastname;
+		  $star->firstname, $star->lastname;
 	    }
 	}
   }
@@ -2934,11 +2252,11 @@ __END__
   # manipulate data then store it back in the database
   my @allstars = $dataset->get("movie/studio/star");
   $_->set_fullname($_->get_firstname.' '.$_->get_lastname)
-    foreach(@allstars);
+      foreach(@allstars);
 
   $dbh->storenode($dataset);
 
-Or from the command line:
+From the command line:
 
   unix> selectall_xml -d 'dbi:Pg:dbname=spybase' 'SELECT * FROM studio NATURAL JOIN movie'
 
@@ -2947,8 +2265,7 @@ Or from the command line:
 =head1 DESCRIPTION
 
 This module is for mapping from databases to Stag objects (Structured
-Tags - see L<Data::Stag>), which can also be represented as XML. It
-has two main uses:
+Tags - see Data::Stag). It has two main uses:
 
 =over
 
@@ -2956,16 +2273,13 @@ has two main uses:
 
 This module can take the results of any SQL query and decompose the
 flattened results into a tree data structure which reflects the
-foreign keys in the underlying relational schema. It does this by
-looking at the SQL query and introspecting the database schema, rather
-than requiring metadata or an object model.
-
-In this respect, the module works just like a regular L<DBI> handle, with
-some extra methods provided.
+underlying relational schema. It does this by looking at the SQL query
+and introspecting the schema, rather than requiring metadata or an
+object model.
 
 =item Storing Data
 
-DBStag objects can store any tree-like datastructure (such as XML
+DBIStag objects can store any tree-like datastructure (such as XML
 documents) into a database using normalized schema that reflects the
 structure of the tree being stored. This is done using little or no
 metadata.
@@ -2974,478 +2288,22 @@ XML can also be imported, and a relational schema automatically generated.
 
 =back
 
-For a tutorial on using DBStag to build and query relational databases
-from XML sources, please see L<DBIx::DBStag::Cookbook>
-
-=head2 HOW QUERYING WORKS
-
-This is a general overview of the rules for turning SQL query results
-into a tree like data structure.
-
-=head3 Relations
-
-Relations (i.e. tables and views) are elements (nodes) in the
-tree. The elements have the same name as the relation in the database.
-
-=head3 Columns
-
-Table and view columns of a relation are sub-elements of the table or
-view to which they belong. These elements will be B<data elements>
-(i.e. terminal nodes). Only the columns selected in the SQL query
-will be present.
-
-For example, the following query
-
-  SELECT name, job FROM person;
-
-will return a data structure that looks like this:
-
-  (person
-   (name "fred")
-   (job "forklift driver"))
-  (person
-   (name "joe")
-   (job "steamroller mechanic"))
-
-The data is shown as a lisp-style S-Expression - it can also be
-expressed as XML, or manipulated as an object within perl.
-
-=head3 Table aliases
-
-If an ALIAS is used in the FROM part of the SQL query, the relation
-element will be nested inside an element with the same name as the
-alias. For instance, the query
-
-  SELECT name FROM person AS author WHERE job = 'author';
-
-Will return a data structure like this:
-
-  (author
-   (person
-    (name "Philip K Dick")))
-
-The underlying assumption is that aliasing is used for a purpose in
-the original query; for instance, to determine the context of the
-relation where it may be ambiguous.
-
-  SELECT *
-  FROM person AS employee 
-           INNER JOIN 
-       person AS boss ON (employee.boss_id = boss.person_id)
-
-Will generate a nested result structure similar to this -
-
-  (employee
-   (person
-    (person_id "...")
-    (name "...")
-    (foo  "...")
-    (boss
-     (person
-      (person_id "...")
-      (name "...")
-      (foo  "...")))))
-
-If we neglected the alias, we would have 'person' directly nested
-under 'person', and the meaning would not be obvious. Note how the
-contents of the SQL query dynamically modifies the schema/structure of
-the result tree.
-
-=head3 NOTE ON SQL SYNTAX
-
-Right now, DBStag is fussy about how you specify aliases; you must use
-B<AS> - you must say
-
-  SELECT name FROM person AS author;
-
-instead of
-
-  SELECT name FROM person author;
-
-=head3 Nesting of relations
-
-The main utility of querying using this module is in retrieving the
-nested relation elements from the flattened query results. Given a
-query over relations A, B, C, D,... there are a number of possible
-tree structures. Not all of the tree structures are meaningful.
-
-Usually it will make no sense to nest A under B if there is no foreign
-key relationship linking either A to B, or B to A. This is not always
-the case - it may be desirable to nest A under B if there is an
-intermediate linking table that is required at the relational level
-but not required in the tree structure.
-
-DBStag will guess a structure/schema based on the ordering of the
-relations in your FROM clause. However, this guess can be over-ridden
-at either the SQL level (using DBStag specific SQL extensions) or at
-the API level.
-
-The default algorithm is to nest each relation element under the
-relation element preceeding it in the FROM clause; for instance:
-
-  SELECT * FROM a NATURAL JOIN b NATURAL JOIN c
-
-If there are appropriately named foreign keys, the following data will
-be returned (assuming one row in each of a, b and c)
-
-  (set
-   (a
-    (a_foo "...")
-    (b
-     (b_foo "...")
-     (c
-      (c_foo "...")))))
-
-where 'x_foo' is a column in relation 'x'
-
-This is not always desirable. If both b and c have foreign keys into
-table a, DBStag will not detect this - you have to guide it. There are
-two ways of doing this - you can guide by bracketing your FROM clause
-like this:
-
-  !!##
-  !!## NOTE - THIS PART IS NOT SET IN STONE - THIS MAY CHANGE
-  !!## 
-  SELECT * FROM (a NATURAL JOIN b) NATURAL JOIN c
-
-This will generate
-
-  (set
-   (a
-    (a_foo "...")
-    (b
-     (b_foo "..."))
-    (c
-     (c_foo "..."))))
- 
-Now b and c are siblings in the tree. The algorithm is similar to
-before: nest each relation element under the relation element
-preceeding it; or, if the preceeding item in the FROM clause is a
-bracketed structure, nest it under the first relational element in the
-bracketed structure.
-
-(Note that in MySQL you may not place brackets in the FROM clause in
-this way)
-
-Another way to achieve the same thing is to specify the desired tree
-structure using a DBStag specific SQL extension. The DBStag specific
-component is removed from the SQL before being presented to the
-DBMS. The extension is the B<USE NESTING> clause, which should come at
-the end of the SQL query (and is subsequently removed before
-processing by the DBMS).
-
-  SELECT * 
-  FROM a NATURAL JOIN b NATURAL JOIN c 
-  USE NESTING (set (a (b)(c)));
-
-This will generate the same tree as above (i.e. 'b' and 'c' are
-siblings). Notice how the nesting in the clause is the same as the
-nesting in the resulting tree structure.
-
-Note that 'set' is not a table in the underlying relational schema -
-the result data tree requires a named top level node to group all the
-'a' relations under. You can call this top level element whatever you
-like.
-
-If you are using the DBStag API directly, you can pass in the nesting
-structure as an argument to the select call; for instance:
-
-  my $seq =
-    $dbh->selectall_xml(-sql=>q[SELECT * 
-                                FROM a NATURAL JOIN b 
-                                     NATURAL JOIN c],
-                        -nesting=>'(set (a (b)(c)))');
-
-or the equivalent -
-
-  my $seq =
-    $dbh->selectall_xml(q[SELECT * 
-                          FROM a NATURAL JOIN b 
-                               NATURAL JOIN c],
-                        '(set (a (b)(c)))');
-
-If you like, you can also use XML here (only at the API level, not at
-the SQL level) -
-
-  my $seq =
-    $dbh->selectall_xml(-sql=>q[SELECT * 
-                                FROM a NATURAL JOIN b 
-                                     NATURAL JOIN c],
-                        -nesting=>q[
-                                    <set>
-                                      <a>
-                                        <b></b>
-                                        <c></c>
-                                      </a>
-                                    </set>
-                                   ]);
-
-As you can see, this is a little more verbose.
-
-Most command line scripts that use this module should allow
-pass-through via the '-nesting' switch.
-
-=head3 Aliasing of functions and expressions
-
-If you alias a function or an expression, DBStag needs to know where
-to put the resulting column; the column must be aliased.
-
-This is inferred from the first named column in the function or
-expression; for example, in the SQL below
-
-  SELECT blah.*, foo.*, foo.x - foo.y AS z
-
-The B<z> element will be nested under the B<foo> element
-
-You can force different nesting using a double underscore:
-
-  SELECT blah.*, foo.*, foo.x - foo.y AS blah__z
-
-This will nest the B<z> element under the B<blah> element
-
-=head2 Conformance to DTD/XML-Schema
-
-DBStag returns L<Data::Stag> structures that are equivalent to a
-simplified subset of XML (and also a simplified subset of lisp
-S-Expressions).
-
-These structures are examples of B<semi-structured data> - a good
-reference is this book -
-
-  Data on the Web: From Relations to Semistructured Data and XML
-  Serge Abiteboul, Dan Suciu, Peter Buneman
-  Morgan Kaufmann; 1st edition (January 2000)
-
-The schema for the resulting Stag structures can be seen to conform to
-a schema that is dynamically determined at query-time from the
-underlying relational schema and from the specification of the query itself.
-
-=head1 CLASS METHODS
-
-
-=head2 connect
-
-  Usage   - $dbh = DBIx::DBStag->connect($DSN);
-  Returns - L<DBIx::DBStag>
-  Args    - see the connect() method in L<DBI>
-
-=cut
-
-=head2 selectall_stag
-
- Usage   - $stag = $dbh->selectall_stag($sql);
-           $stag = $dbh->selectall_stag($sql, $nesting_clause);
-           $stag = $dbh->selectall_stag(-template=>$template,
-                                        -bind=>{%variable_bindinfs});
- Returns - L<Data::Stag>
- Args    - sql string, 
-           [nesting string], 
-           [bind hashref],
-           [template DBIx::DBStag::SQLTemplate]
-
-Executes a query and returns a L<Data::Stag> structure
-
-An optional nesting expression can be passed in to control how the
-relation is decomposed into a tree. The nesting expression can be XML
-or an S-Expression; see above for details
-
-=cut
-
-=head2 selectall_xml
-
- Usage   - $xml = $dbh->selectall_xml($sql);
- Returns - string
- Args    - See selectall_stag()
-
-As selectall_stag(), but the results are transformed into an XML string
-
-=cut
-
-=head2 selectall_sxpr
-
- Usage   - $sxpr = $dbh->selectall_sxpr($sql);
- Returns - string
- Args    - See selectall_stag()
-
-As selectall_stag(), but the results are transformed into an
-S-Expression string; see L<Data::Stag> for more details.
-
-=cut
-
-=head2 selectall_sax
-
- Usage   - $dbh->selectall_sax(-sql=>$sql, -handler=>$sax_handler);
- Returns - string
- Args    - sql string, [nesting string], handler SAX
-
-As selectall_stag(), but the results are transformed into SAX events
-
-[currently this is just a wrapper to selectall_xml but a genuine event
-generation model will later be used]
-
-=cut
-
-=head2 selectall_rows
-
- Usage   - $tbl = $dbh->selectall_rows($sql);
- Returns - arrayref of arrayref
- Args    - See selectall_stag()
-
-As selectall_stag(), but the results of the SQL query are left
-undecomposed and unnested. The resulting structure is just a flat
-table; the first row is the column headings. This is similar to
-DBI->selectall_arrayref(). The main reason to use this over the direct
-DBI method is to take advantage of other stag functionality, such as
-templates
-
-=head2 prepare_stag SEMI-PRIVATE METHOD
-
- Usage   - $prepare_h = $dbh->prepare_stag(-template=>$template);
- Returns - hashref (see below)
- Args    - See selectall_stag()
-
-Returns a hashref
-
-      {
-       sth=>$sth,
-       exec_args=>\@exec_args,
-       cols=>\@cols,
-       col_aliases_ordered=>\@col_aliases_ordered,
-       alias=>$aliasstruct,
-       nesting=>$nesting
-      };
-
-
-=cut
-
-=head2 storenode
-
-  Usage   - $dbh->storenode($stag);
-  Returns - 
-  Args    - L<Data::Stag>
-
-Recursively stores a tree structure in the database
-
-=cut
-
-=head1 SQL TEMPLATES
-
-DBStag comes with its own SQL templating system. This allows you to
-reuse the same canned SQL or similar SQL qeuries in different
-contexts. See L<DBIx::DBStag::SQLTemplate>
-
-=head2 find_template
-
-  Usage   - $template = $dbh->find_template("my-template-name");
-  Returns - L<DBIx::DBStag::SQLTemplate>
-  Args    - str
-
-Returns an object representing a canned paramterized SQL query. See
-L<DBIx::DBStag::SQLTemplate> for documentation on templates
-
-=head2 list_templates
-
-  Usage   - $templates = $dbh->list_templates();
-  Returns - Arrayref of L<DBIx::DBStag::SQLTemplate>
-  Args    - 
-
-Returns a list of ALL defined templates - See
-L<DBIx::DBStag::SQLTemplate>
-
-=head2 find_templates_by_schema
-
-  Usage   - $templates = $dbh->find_templates_by_schema($schema_name);
-  Returns - Arrayref of L<DBIx::DBStag::SQLTemplate>
-  Args    - str
-
-Returns a list of templates for a particular schema - See
-L<DBIx::DBStag::SQLTemplate>
-
-=head2 find_templates_by_dbname
-
-  Usage   - $templates = $dbh->find_templates_by_dbname("mydb");
-  Returns - Arrayref of L<DBIx::DBStag::SQLTemplate>
-  Args    - db name
-
-Returns a list of templates for a particular db
-
-Requires resources to be set up (see below)
-
-
-=cut
-
-=head1 RESOURCES
-
-=head2 resources_list
-
-  Usage   - $rlist = $dbh->resources_list
-  Returns - arrayref to a hashref
-  Args    - none
-
-Returns a list of resources; each resource is a hash
-  
-  {name=>"mydbname",
-   type=>"rdb",
-   schema=>"myschema",
-  }
-
-=head1 SETTING UP RESOURCES
-
-The above methods rely on you having a file describing all the
-relational dbs available to you, and setting the env var
-DBSTAG_DBIMAP_FILE set (this is a B<:> separated list of paths).
-
-B<This is alpha code - not fully documented, API may change>
-
-Currently a resources file is a whitespace delimited text file -
-XML/Sxpr/IText definitions may be available later
-
-Here is an example of a resources file:
-
-  # LOCAL
-  mytestdb         rdb        Pg:mytestdb                      schema=test
-  
-  # SYSTEM
-  worldfactbook    rdb      Pg:worldfactbook@db1.mycompany.com  schema=wfb
-  employees        rdb      Pg:employees@db2.mycompany.com      schema=employees
-
-The first column is the B<nickname> or B<logical name> of the
-resource/db. This nickname can be used instead of the full DBI locator
-path (eg you can just use B<employees> instead of
-B<dbi:Pg:dbname=employees;host=db2.mycompany.com>
-
-The second column is the resource type - rdb is for relational
-database. You can use the same file to track other system datasources
-available to you, but DBStag is only interested in relational dbs.
-
-The 3rd column is a way of locating the resource - driver:name@host
-
-The 4th column is a B<;> separated list of B<tag>=B<value> pairs; the
-most important tag is the B<schema> tag. Multiple dbs may share the
-same schema, and hence share SQL Templates
-
-=cut
-
 =head1 COMMAND LINE SCRIPTS
 
-DBStag is usable without writing any perl, you can use command line
+DBIStag is usable without writing any perl, you can use command line
 scripts and files that utilise tree structures (XML, S-Expressions)
 
 =over
 
 =item selectall_xml.pl
 
- selectall_xml.pl -d <DSN> [-n <nestexpr>] <SQL>
+ selectall_xml.pl -d <DSN> [-p <pathexpr>] <SQL>
 
 Queries database and writes decomposed relation as XML
 
-Can also be used with templates:
-
- selectall_xml.pl -d <DSN> /<templatename> <var1> <var2> ... <varN>
-
 =item selectall_html.pl
 
- selectall_html.pl -d <DSN> [-n <nestexpr>] <SQL>
+ selectall_html.pl -d <DSN> [-p <pathexpr>] <SQL>
 
 Queries database and writes decomposed relation as HTML with nested
 tables indicating the nested structures.
@@ -3469,42 +2327,11 @@ CREATE TABLE statements.
 
 =back
 
-=head1 ENVIRONMENT VARIABLES
-
-=over
-
-=item DBSTAG_TRACE
-
-setting this environment will cause all SQL statements to be printed
-on STDERR
-
-=back
-
 =head1 BUGS
 
-This is alpha software! Probably several bugs.
-
-The SQL parsing can be quite particular - sometimes the SQL can be
-parsed by the DBMS but not by DBStag. The error messages are not always helpful.
-
-There are probably a few cases the SQL SELECT parsing grammar cannot deal with.
+This is alpha software!
 
 If you want to select from views, you need to hack DBIx::DBSchema (as of v0.21)
-
-=head1 TODO
-
-Use SQL::Translator to make SQL DDL generation less Pg-specific; also
-for deducing foreign keys (right now foreign keys are guessed by the
-name of the column, eg table_id)
-
-Can we cache the grammar so that startup is not so slow?
-
-Improve algorithm so that events are fired rather than building up
-entire structure in-memory
-
-Tie in all DBI attributes accessible by hash, i.e.: $dbh->{...}
-
-Error handling
 
 =head1 WEBSITE
 
@@ -3516,7 +2343,7 @@ Chris Mungall <F<cjm@fruitfly.org>>
 
 =head1 COPYRIGHT
 
-Copyright (c) 2004 Chris Mungall
+Copyright (c) 2002 Chris Mungall
 
 This module is free software.
 You may distribute this module under the same terms as perl itself
