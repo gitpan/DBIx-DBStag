@@ -127,7 +127,7 @@ WriteMakefile(
 	      'PREREQ_PM'    => {
 				 'Parse::RecDescent'  => 0,
 				 'Text::Balanced'     => 0,
-				 'Data::Stag'         => '0.06',
+				 'Data::Stag'         => '0.07',
 				 'DBIx::DBSchema'     => 0,
 				 'DBI'                => 0,
 				},
