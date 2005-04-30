@@ -20,6 +20,8 @@ my @noupdate = ();
 my $tracenode;
 my $transform;
 my $trust_ids;
+my $autocommit;
+my %cache_h = ();
 GetOptions(
            "help|h"=>\$help,
 	   "db|d=s"=>\$db,
@@ -31,6 +33,8 @@ GetOptions(
            "tracenode=s"=>\$tracenode,
            "transform|t=s"=>\$transform,
            "trust_ids=s"=>\$trust_ids,
+           "cache=s%"=>\%cache_h,
+           "autocommit"=>\$autocommit,
           );
 if ($help) {
     system("perldoc $0");
@@ -39,7 +43,12 @@ if ($help) {
 
 #print STDERR "Connecting to $db\n";
 my $dbh = DBIx::DBStag->connect($db);
-$dbh->dbh->{AutoCommit} = 0;
+eval {
+    $dbh->dbh->{AutoCommit} = $autocommit || 0;
+};
+if ($@) {
+    print STDERR $@;
+}
 
 if ($trust_ids) {
     $dbh->trust_primary_key_values(1);
@@ -54,12 +63,17 @@ if (@mappings) {
 $dbh->noupdate_h({map {$_=>1} @noupdate});
 $dbh->tracenode($tracenode) if $tracenode;
 
+foreach (keys %cache_h) {
+    $dbh->is_caching_on($_, $cache_h{$_});
+}
+
 sub store {
     my $self = shift;
     my $stag = shift;
     #$dbh->begin_work;
     $dbh->storenode($stag);
-    $dbh->commit;
+    $dbh->commit
+      unless $autocommit;
     return;
 }
 
@@ -72,13 +86,13 @@ foreach my $fn (@ARGV) {
     if ($fn eq '-' && !$parser) {
 	$parser = 'xml';
     }
+    my $H;
     if (@units) {
-        my $H;
-	my $storehandler = Data::Stag->makehandler(
+        my $storehandler = Data::Stag->makehandler(
                                                    map {
                                                        $_ =>sub{store(@_)};
                                                    } @units
-                                                  );
+                                               );
         if ($thandler) {
             $H = Data::Stag->chainhandlers([@units],
                                            $thandler,
@@ -87,17 +101,32 @@ foreach my $fn (@ARGV) {
         else {
             $H = $storehandler;
         }
-        Data::Stag->parse(-format=>$parser,-file=>$fn, -handler=>$H);
     }
     else {
-        print STDERR "WARNING! Slurping whole file into memory may be inefficient; consider -u\n";
-        my $stag;
-        my @pargs = (-format=>$parser,-file=>$fn);
-        push(@pargs, -handler=>$thandler) if $thandler;
-	$stag = Data::Stag->parse(@pargs);
-	$dbh->storenode($stag);
-	$dbh->commit;
+        # if no load units are specified, store everything
+        # nested one-level below top
+        $H = Data::Stag->makehandler;
+        $H->catch_end_sub(sub {
+                              my ($handler,$stag) = @_;
+                              if ($handler->depth == 1) {
+                                  store($handler,$stag);
+                                  return;
+                              }
+                              return $stag;
+                          });
     }
+    Data::Stag->parse(-format=>$parser,-file=>$fn, -handler=>$H);
+#    }
+#    else {
+#        print STDERR "WARNING! Slurping whole file into memory may be inefficient; consider -u\n";
+#        my $stag;
+#        my @pargs = (-format=>$parser,-file=>$fn);
+#        push(@pargs, -handler=>$thandler) if $thandler;
+#	$stag = Data::Stag->parse(@pargs);
+#	$dbh->storenode($stag);
+#	$dbh->commit
+#          unless $autocommit;
+#    }
 #    my @kids = $stag->kids;
 #    foreach (@kids) {
 #        $dbh->storenode($_);
@@ -161,6 +190,13 @@ the DB
 If this flag is present, the values for primary key values are
 trusted; otherwise they are assumed to be surrogate internal IDs that
 should not be used. In this case they will be remapped.
+
+=head1 XML TO DB MAPPING
+
+See L<DBIx::DBStag> for details of the actual mapping. Two styles of
+mapping are allowed: stag-dbxml and XORT-style XML. You do not have to
+specify which, they are sufficiently similar that the loader can
+accept either.
 
 =head1 MAKING DATABASE FROM XML FILES
 
@@ -256,6 +292,9 @@ You generally dont need extra metadata here; everything can be
 infered by introspecting the database.
 
 The -u|unit switch controls when transactions are committed
+
+You can omit the -u switch, and every node directly under the top node
+will be stored. This will also be the transaction unit.
 
 If this works, you should now be able to retreive XML from the database, eg
 

@@ -27,6 +27,7 @@ my @order;
 my $color;
 my $out;
 my $sgml;
+my $metadata;
 my @matrixcols;
 my @matrixcells;
 
@@ -60,6 +61,7 @@ GetOptions(
 	   "verbose|v"=>\$verbose,
            "colour|color"=>\$color,
 	   "out|o=s"=>\$out,
+           "metadata"=>\$metadata,
 	   "trace"=>\$ENV{DBSTAG_TRACE},
           );
 @ARGV = map { if (/^\/(.*)/) {$template_name=$1;()} else {$_} } @ARGV;
@@ -178,6 +180,8 @@ if (!$db) {
 my $dbh = 
   DBIx::DBStag->connect($db, $user, $pass);
 
+$dbh->include_metadata($metadata);
+
 my $xml;
 my @sel_args = ($sql, $nesting);
 if ($template) {
@@ -268,7 +272,7 @@ eval {
             else {
                 # ASCII
                 printf "%s\n", 
-                  join("\t", map {defined $_ ? $_ : '\\NULL'} @$r);
+                  join("\t", map {esc_col_val($_)} @$r);
             }
             $count++;
         }
@@ -298,6 +302,15 @@ if ($show) {
     print "DBI SQL:\n$sql\n\nARGUMENT BINDINGS: @exec_args\n";
 }
 #print $xml;
+exit 0;
+
+sub esc_col_val {
+    my $str = shift;
+    return '\\NULL' unless defined $str;
+    $str =~ s/\t/\\t/g;
+    $str =~ s/\n/\\n/g;
+    $str;
+}
 
 __END__
 
