@@ -27,6 +27,8 @@ my @order;
 my $color;
 my $out;
 my $sgml;
+my $pre_sql;
+my $aliaspolicy;
 my $metadata;
 my @matrixcols;
 my @matrixcells;
@@ -43,12 +45,12 @@ while (my $arg = shift @ARGV) {
 @ARGV = @ARGV2;
 GetOptions(
            "help|h"=>\$help,
-	   "db|d=s"=>\$db,
 	   "rows"=>\$rows,
            "show"=>\$show,
 	   "sgml"=>\$sgml,
 	   "nesting|n=s"=>\$nesting,
 	   "file|f=s"=>\$file,
+	   "db|d=s"=>\$db,
 	   "user|u=s"=>\$user,
 	   "pass|p=s"=>\$pass,
 	   "template|t=s"=>\$template_name,
@@ -59,8 +61,10 @@ GetOptions(
 	   "select|s=s"=>\$select,
 	   "order=s@"=>\@order,
 	   "verbose|v"=>\$verbose,
+	   "aliaspolicy|alias=s"=>\$aliaspolicy,
            "colour|color"=>\$color,
 	   "out|o=s"=>\$out,
+	   "pre=s"=>\$pre_sql,
            "metadata"=>\$metadata,
 	   "trace"=>\$ENV{DBSTAG_TRACE},
           );
@@ -182,8 +186,12 @@ my $dbh =
 
 $dbh->include_metadata($metadata);
 
+if ($pre_sql) {
+    $dbh->do($pre_sql);
+}
+
 my $xml;
-my @sel_args = ($sql, $nesting);
+my @sel_args = (-sql=>$sql, -nesting=>$nesting);
 if ($template) {
     if ($where) {
 	$template->set_clause(where => $where);
@@ -199,8 +207,14 @@ if ($template) {
     my %argh = ();
     while (my $arg = shift @ARGV) {
 #	print "ARG:$arg;;\n";
-	if ($arg =~ /(.*)=(.*)/) {
-	    $argh{$1} = $2;
+	if ($arg =~ /(.*)\@=(.*)/) {
+            my ($k,$v) = ($1,$2);
+            $v = [split(/\,/,$v)];
+	    $argh{$k} = $v;
+	}
+	elsif ($arg =~ /(.*)=(.*)/) {
+            my ($k,$v) = ($1,$2);
+	    $argh{$k} = $v;
 	}
 	else {
 	    push(@args, $arg);
@@ -214,7 +228,10 @@ if ($template) {
 	}
     }
     @sel_args =
-      ($template, $nesting, $bind);
+      (-template=>$template, -nesting=>$nesting, -bind=>$bind);
+}
+if ($aliaspolicy) {
+    push(@sel_args, -aliaspolicy=>$aliaspolicy);
 }
 eval {
     if ($rows) {
@@ -348,6 +365,10 @@ Or:
 
   selectall_xml.pl -d genedb /genedb-gene Adh 
 
+Or:
+
+  selectall_xml.pl -d genedb /genedb-gene gene_symbol@=Adh,dpp,bam,indy
+
 A template is indicated by the syntactic shorthand of using a slash to
 precede the template name; in this case the template is called
 B<genedb-gene>. the -t option can also be used.
@@ -443,6 +464,11 @@ sometimes it is preferable to return the results as a table rather
 than xml or a similar nested structure. specifying -rows will fetch a
 table, one line per row, and columns seperated by tabs
 
+=item -pre SQL
+
+a piece of SQL is that is executed immediately before the main query; e.g.:
+
+  -pre "SET search_path=myschema,public"
 
 =item -o|out FILE
 

@@ -1,4 +1,4 @@
-# $Id: DBStag.pm,v 1.44 2005/04/29 21:07:46 cmungall Exp $
+# $Id: DBStag.pm,v 1.52 2006/03/11 01:51:43 cmungall Exp $
 # -------------------------------------------------------
 #
 # Copyright (C) 2002 Chris Mungall <cjm@fruitfly.org>
@@ -21,7 +21,7 @@ use DBIx::DBSchema;
 use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION='0.07';
+$VERSION='0.08';
 
 
 our $DEBUG;
@@ -122,7 +122,7 @@ EOM
     # HACK
     $self->dbh->{RaiseError} = 1;
     $self->dbh->{ShowErrorStatement} = 1;
-    if ($dbi =~ /dbi:(\w+)/) {
+    if ($dbi =~ /dbi:([\w\d]+)/) {
         $self->{_driver} = $1;
     }
     $self->setup;
@@ -151,16 +151,22 @@ sub resolve_dbi {
 	}
 	if ($res) {
 	    my $loc = $res->{loc};
-	    if ($loc =~ /(\w+):(\S+)\@(\S+)/) {
+	    if ($loc =~ /(\S+):(\S+)\@(\S+)/) {
 		my $dbms = $1;
 		my $dbn = $2;
 		my $host = $3;
-		$dbi = "dbi:$dbms:database=$dbn:host=$host";
 		if ($dbms =~ /pg/i) {
 		    $dbi = "dbi:Pg:dbname=$dbn;host=$host";
 		}
+		elsif ($dbms =~ /db2/i) {
+		    $dbi = "dbi:Pg:$dbn;host=$host";
+		}
+                else {
+                    # default - tested on MySQL
+                    $dbi = "dbi:$dbms:database=$dbn:host=$host";
+                }
 	    } 
-	    elsif ($loc =~ /(\w+):(\S+)$/) {
+	    elsif ($loc =~ /(\S+):(\S+)$/) {
 		my $dbms = $1;
 		my $dbn = $2;
 		$dbi = "dbi:$dbms:database=$dbn";
@@ -1797,6 +1803,18 @@ sub _storenode {
     else {
         $operation = $this_op;
     }
+
+    if ($operation eq 'replace') {
+        # replace = delete followed by insert
+        if (%unique_constr) {
+            $self->deleterow($element,\%unique_constr);
+        }
+        else {
+            $self->throw("Cannot find row to delete it:\n".$node->xml);
+        }
+        $operation = 'insert';
+    }
+
     if ($operation eq 'update') {
         # ** UPDATE **
         if ($self->noupdate_h->{$element}) {
@@ -1856,7 +1874,7 @@ sub _storenode {
             if (!$id) {
                 # this only happens if $self->force(1) is set
                 if (@delayed_store) {
-                    confess("Insert on $element failed, this is required for storing subnodes");
+                    confess("Insert on \"$element\" did not return a primary key ID.\n Possible causes: sequence not define [Pg]?");
                 }
                 return;
             }
@@ -2138,8 +2156,8 @@ sub selectall_rows {
 # ---------------------------------------
 sub selectall_stag {
     my $self = shift;
-    my ($sql, $nesting, $bind, $template, $return_arrayref, $include_metadata) = 
-      rearrange([qw(sql nesting bind template return_arrayref include_metadata)], @_);
+    my ($sql, $nesting, $bind, $template, $return_arrayref, $include_metadata, $aliaspolicy) = 
+      rearrange([qw(sql nesting bind template return_arrayref include_metadata aliaspolicy)], @_);
     my $prep_h = $self->prepare_stag(@_);
     my $cols = $prep_h->{cols};
     my $sth = $prep_h->{sth};
@@ -2169,7 +2187,8 @@ sub selectall_stag {
                          -rows=>$rows,
                          -cols=>$cols,
                          -alias=>$prep_h->{alias},
-                         -nesting=>$prep_h->{nesting}
+                         -nesting=>$prep_h->{nesting},
+                         -aliaspolicy=>$aliaspolicy,
                         );
     if ($include_metadata) {
         my ($last_sql, @sql_args) = @{$self->last_sql_and_args || []};
@@ -2193,8 +2212,8 @@ sub selectall_stag {
 
 sub prepare_stag {
     my $self = shift;
-    my ($sql, $nesting, $bind, $template, $return_arrayref) = 
-      rearrange([qw(sql nesting bind template return_arrayref)], @_);
+    my ($sql, $nesting, $bind, $template, $return_arrayref, $aliaspolicy) = 
+      rearrange([qw(sql nesting bind template return_arrayref aliaspolicy)], @_);
 
     my $parser = $self->parser;
 
@@ -2595,7 +2614,7 @@ sub reconstruct {
         $constraints,    # NOT USED!!!
         $nesting,           # REQUIRED - tree representing decomposed schema
         $aliasstruct,    # OPTIONAL - renaming of columns in R
-        $noaliases) =
+        $aliaspolicy) =
           rearrange([qw(schema
                         rows
                         top
@@ -2603,7 +2622,9 @@ sub reconstruct {
                         constraints
                         nesting
                         alias
-                        noaliases)], @_);
+                        aliaspolicy)], @_);
+
+    $aliaspolicy = 'nest' unless $aliaspolicy;
 
     # --- get the schema ---
     #
@@ -2712,7 +2733,7 @@ sub reconstruct {
         $aliasstruct = $tree->from('sxprstr', $aliasstruct);
     }
     my @aliases = ();
-    if ($aliasstruct && !$noaliases) {
+    if ($aliasstruct && $aliaspolicy !~ /^a/i) {
         @aliases = $aliasstruct->getnode_alias;
     }
     my %alias2baserelation =
@@ -2891,12 +2912,13 @@ sub reconstruct {
         # traverse depth first down nesting;
         # add new nodes as children of the parent
         $self->make_a_tree($tree,
-                    $top_record_h,
-		    $first_in_nesting,
-		    \%current_relation_h,
-                    \%pkey_by_relationname,
-		    \%cols_by_relationname,
-                    \%alias2baserelation);
+                           $top_record_h,
+                           $first_in_nesting,
+                           \%current_relation_h,
+                           \%pkey_by_relationname,
+                           \%cols_by_relationname,
+                           \%alias2baserelation,
+                           $aliaspolicy);
     }
     return $topstruct;
 }
@@ -2919,7 +2941,8 @@ sub make_a_tree {
     my %pkey_by_relationname = %{shift ||{}};
     my %cols_by_relationname = %{shift ||{}};
     my %alias2baserelation = %{shift ||{}};
-    
+    my $aliaspolicy = shift;
+
     my $relationname = $node->name;
     my $relationrec = $current_relation_h{$relationname};
     my $pkcols = $pkey_by_relationname{$relationname};
@@ -2975,17 +2998,30 @@ sub make_a_tree {
 	    # level of nesting
 	    my $baserelation = $alias2baserelation{$relationname};
 	    if ($baserelation) {
-#		trace(0, "R=$relationname BASE=$baserelation\n") if $TRACE;
-		my $baserelationstruct =
-		  Data::Stag->new($baserelation =>
-				  $relationstruct->data);
-		stag_add($parent_relationstruct,
-			 $relationname,
-			 [$baserelationstruct]);
+
+                # $aliaspolicy eq 'nest' or 't'
+                # nest base relations inside an alias node
+                # OR use table name in place of alias name
+                if ($aliaspolicy =~ /^t/i) {
+                    stag_add($parent_relationstruct,
+                             $baserelation,
+                             $relationstruct->data);
+                }
+                else {
+                    # nest
+                    my $baserelationstruct =
+                      Data::Stag->new($baserelation =>
+                                      $relationstruct->data);
+                    stag_add($parent_relationstruct,
+                             $relationname,
+                             [$baserelationstruct]);
+                }
 	    } else {
-		stag_add($parent_relationstruct,
-			 $relationstruct->name,
-			 $relationstruct->data);
+                # either no aliases, or $aliaspolicy eq 'a'
+                # (in which case columns already mapped to aliases)
+                stag_add($parent_relationstruct,
+                         $relationstruct->name,
+                         $relationstruct->data);
 	    }
 	    $rec =
 	      {struct=>$relationstruct,
@@ -3004,7 +3040,8 @@ sub make_a_tree {
 			   \%current_relation_h,
 			   \%pkey_by_relationname,
 			   \%cols_by_relationname,
-			   \%alias2baserelation);
+			   \%alias2baserelation,
+                           $aliaspolicy);
     }
 }
 
@@ -3131,6 +3168,7 @@ sub insertrow {
     my $self = shift;
     my ($table, $colvalh, $pkcol) = @_;
       
+    my $driver = $self->dbh->{Driver}->{Name};
     my @cols = keys %$colvalh;
     my @vals = 
       map {
@@ -3165,23 +3203,31 @@ sub insertrow {
     return unless $succeeded;
     my $pkval;
     if ($pkcol) {
+        # primary key value may have been specified in the xml
+        # (this is necessary for non-surrogate pks in tables that
+        #  are to be linked to via foreign keys)
         $pkval = $colvalh->{$pkcol};
+
+        # pk was not supplied - perhaps this is a SERIAL/AUTO_INCREMENT
+        # column (ie surrogate integer primary key)
         if (!$pkval) {
-            if (0) {
-                # POSTGRES HARDCODE ALERT
+            # assume pk is a SERIAL / AUTO_INCREMENT
+            if ($driver eq 'Pg') {
                 my $seqn = sprintf("%s_%s_seq",
                                    $table,
                                    $pkcol);
-                trace(0, "CURRVAL $seqn = $pkval") if $TRACE;
                 $pkval  = $self->selectval("select currval('$seqn')");        
+                trace(0, "CURRVAL $seqn = $pkval     [Pg]") if $TRACE;
             }
-            if (1) {
-                # THIS IS NOT TRANSACTION SAFE
-                # ONLY WORKS FOR SERIALS/AUTO-INCREMENTS
+            # this doesn't work on older
+            # versions of DBI/DBD::mysql
+            # seems to have been fixed Oct 2004 release
+            elsif ($driver eq 'mysql') {
+                $pkval = $self->dbh->last_insert_id(undef,undef,$table,$pkcol);
+                trace(0, "CURRVAL mysql_insert_id $pkval   [mysql]") if $TRACE;
+            }
+            else {
                 $pkval  = $self->selectval("select max($pkcol) from $table");
-
-                # THIS DOESN'T WORK FOR POSTGRESQL:
-                #$pkval = $self->dbh->last_insert_id;
             }
         }
         trace(0, "PKVAL = $pkval") if $TRACE;
@@ -3615,7 +3661,7 @@ sub rearrange {
   # catch user misspellings resulting in unrecognized names
   my(@restkeys) = keys %param;
   if (scalar(@restkeys) > 0) {
-       carp("@restkeys not processed in rearrange(), did you use a
+       confess("@restkeys not processed in rearrange(), did you use a
        non-recognized parameter name ? ");
   }
   return @return_array;
@@ -3982,6 +4028,10 @@ You can force different nesting using a B<double underscore>:
   SELECT blah.*, foo.*, foo.x - foo.y AS blah__z
 
 This will nest the B<z> element under the B<blah> element
+
+If you would like to override this behaviour and use the alias as the
+element name, pass in the -aliaspolicy=>'a' arg to the API call. If
+you wish to use the table names without nesting, use -aliaspolicy=>'t'. 
 
 =head2 Conformance to DTD/XML-Schema
 
