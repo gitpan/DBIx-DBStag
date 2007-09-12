@@ -19,11 +19,13 @@ my $parser;
 my @mappings;
 my $mapconf;
 my @noupdate = ();
+my $force;
 my $tracenode;
 my $transform;
 my $trust_ids;
 my $autocommit;
 my %cache_h = ();
+my $safe;
 GetOptions(
            "help|h"=>\$help,
 	   "db|d=s"=>\$db,
@@ -38,6 +40,8 @@ GetOptions(
            "transform|t=s"=>\$transform,
            "trust_ids=s"=>\$trust_ids,
            "cache=s%"=>\%cache_h,
+           "force"=>\$force,
+           "safe"=>\$safe,
            "autocommit"=>\$autocommit,
           );
 if ($help) {
@@ -66,6 +70,8 @@ if (@mappings) {
 @noupdate = map {split(/\,/,$_)} @noupdate;
 $dbh->noupdate_h({map {$_=>1} @noupdate});
 $dbh->tracenode($tracenode) if $tracenode;
+$dbh->force(1) if $force;
+$dbh->force_safe_node_names(1) if $safe;
 
 foreach (keys %cache_h) {
     $dbh->is_caching_on($_, $cache_h{$_});
@@ -75,9 +81,20 @@ sub store {
     my $self = shift;
     my $stag = shift;
     #$dbh->begin_work;
-    $dbh->storenode($stag);
-    $dbh->commit
-      unless $autocommit;
+    eval {
+        $dbh->storenode($stag);
+        $dbh->commit
+          unless $autocommit;
+    };
+    if ($@) {
+        print STDERR $@;
+        if ($force) {
+            print STDERR "-force set, ignoring error";
+        }
+        else {
+            exit 1;
+        }
+    }
     return;
 }
 
@@ -112,7 +129,8 @@ foreach my $fn (@ARGV) {
         $H = Data::Stag->makehandler;
         $H->catch_end_sub(sub {
                               my ($handler,$stag) = @_;
-                              if ($handler->depth == 1) {
+                              if ($handler->depth == 1 &&
+                                  $stag->element ne '@') {
                                   store($handler,$stag);
                                   return;
                               }
@@ -120,21 +138,6 @@ foreach my $fn (@ARGV) {
                           });
     }
     Data::Stag->parse(-format=>$parser,-file=>$fn, -handler=>$H);
-#    }
-#    else {
-#        print STDERR "WARNING! Slurping whole file into memory may be inefficient; consider -u\n";
-#        my $stag;
-#        my @pargs = (-format=>$parser,-file=>$fn);
-#        push(@pargs, -handler=>$thandler) if $thandler;
-#	$stag = Data::Stag->parse(@pargs);
-#	$dbh->storenode($stag);
-#	$dbh->commit
-#          unless $autocommit;
-#    }
-#    my @kids = $stag->kids;
-#    foreach (@kids) {
-#        $dbh->storenode($_);
-#    }
 }
 $dbh->disconnect;
 exit 0;
@@ -202,6 +205,54 @@ the DB
 If this flag is present, the values for primary key values are
 trusted; otherwise they are assumed to be surrogate internal IDs that
 should not be used. In this case they will be remapped.
+
+=head3 -tracenode B<TABLE/COLUMN>
+
+E.g.
+
+  -tracenode person/name
+
+Writes out a line on STDERR for every new person inserted/updated
+
+=head3 -cache B<TABLE>=B<MODE>
+
+Can be specified multiple times
+
+Example:
+
+  -cache 
+
+                   0: off (default)
+                   1: memory-caching ON
+                   2: memory-caching OFF, bulkload ON
+                   3: memory-caching ON, bulkload ON
+
+IN-MEMORY CACHING
+
+By default no in-memory caching is used. If this is set to 1,
+then an in-memory cache is used for any particular element. No cache
+management is used, so you should be sure not to cache elements that
+will cause memory overloads.
+
+Setting this will not affect the final result, it is purely an
+efficiency measure for use with storenode().
+
+The cache is indexed by all unique keys for that particular
+element/table, wherever those unique keys are set
+
+BULKLOAD
+
+If bulkload is used without memory-caching (set to 2), then only
+INSERTs will be performed for this element. Note that this could
+potentially cause a unique key violation, if the same element is
+present twice
+
+If bulkload is used with memory-caching (set to 3) then only INSERTs
+will be performed; the unique serial/autoincrement identifiers for
+those inserts will be cached and used. This means you can have the
+same element twice. However, the load must take place in one session,
+otherwise the contents of memory will be lost
+
 
 =head1 XML TO DB MAPPING
 
