@@ -1,4 +1,4 @@
-# $Id: DBStag.pm,v 1.57 2007/08/29 09:33:45 cmungall Exp $
+# $Id: DBStag.pm,v 1.59 2008/02/06 00:50:55 cmungall Exp $
 # -------------------------------------------------------
 #
 # Copyright (C) 2002 Chris Mungall <cjm@fruitfly.org>
@@ -21,7 +21,7 @@ use DBIx::DBSchema;
 use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION='0.09';
+$VERSION='0.10';
 
 
 our $DEBUG;
@@ -1604,13 +1604,14 @@ sub _storenode {
     #            $sn->data($nu_id) if $nu_id;
     #        }
 
-    # ---- EXPERIMENTAL ----
-    # if no unique keys are provided, assume that all
-    # non-PK columns together provide a compound unique key
-    # <<DANGEROUS ASSUMPTION!!>> expedient for now!
-    if (!@usets) {
-        #        push(@usets, [grep {$_ ne $pkcol} @cols]);
-        @usets = ( [grep {$_ ne $pkcol} @cols] );
+    if (0) {
+        # ---- EXPERIMENTAL ----
+        # if no unique keys are provided, assume that all
+        # non-PK columns together provide a compound unique key
+        # <<DANGEROUS ASSUMPTION!!>> expedient for now!
+        if (!@usets) {
+            @usets = ( [grep {$_ ne $pkcol} @cols] );
+        }
     }
     if ($pkcol) {
         # make single PK the first unique key set;
@@ -3292,13 +3293,15 @@ sub insertrow {
     my @cols = keys %$colvalh;
     my @vals = 
       map {
-          defined($_) ? $self->quote($colvalh->{$_}) : 'NULL'
+          defined($_) ? $colvalh->{$_} : undef
       } @cols;
+    my @placeholders = map { '?' } @vals;
     my $sql =
       sprintf("INSERT INTO %s (%s) VALUES (%s)",
               $table,
               join(", ", @cols),
-              join(", ", @vals),
+              #join(", ", @vals),
+              join(", ", @placeholders),
              );
     if (!@cols) {
 	$sql = "INSERT INTO $table DEFAULT VALUES";
@@ -3307,7 +3310,8 @@ sub insertrow {
     trace(0, "SQL:$sql") if $TRACE;
     my $succeeded = 0;
     eval {
-        my $rval = $self->dbh->do($sql);
+        my $sth = $self->dbh->prepare($sql);
+        my $rval = $sth->execute(@vals);
         $succeeded = 1 if defined $rval;
     };
     if ($@) {
