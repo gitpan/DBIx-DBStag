@@ -21,7 +21,7 @@ use DBIx::DBSchema;
 use Text::Balanced qw(extract_bracketed);
 #use SQL::Statement;
 use Parse::RecDescent;
-$VERSION='0.11';
+$VERSION='0.12';
 
 
 our $DEBUG;
